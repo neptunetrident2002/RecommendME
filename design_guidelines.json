@@ -1,0 +1,113 @@
+{
+  "theme": "LIGHT",
+  "archetype": "6 (Vibrant Play)",
+  "emotional_tone": "Playful, friendly, genuine, human, non-social-network (intimate 1-on-1)",
+  "typography": {
+    "headings": {
+      "font_family": "Fredoka, sans-serif",
+      "font_weight": "600",
+      "letter_spacing": "tracking-tight"
+    },
+    "body": {
+      "font_family": "Nunito, sans-serif",
+      "font_weight": "500",
+      "line_height": "leading-relaxed"
+    },
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl",
+      "h3": "text-xl sm:text-2xl",
+      "body": "text-base",
+      "small": "text-sm font-bold uppercase tracking-widest"
+    }
+  },
+  "colors": {
+    "background": {
+      "primary": "#FFFFFF",
+      "secondary": "#F8F9FA",
+      "tertiary": "#F0F3F4"
+    },
+    "text": {
+      "primary": "#1F2937",
+      "secondary": "#4B5563",
+      "tertiary": "#9CA3AF"
+    },
+    "brand": {
+      "primary": "#1CB0F6",
+      "primary_shadow": "#1899D6",
+      "read_category": "#FF9600",
+      "read_shadow": "#CC7A00",
+      "listen_category": "#FF4B4B",
+      "listen_shadow": "#CC3C3C",
+      "watch_category": "#FFC800",
+      "watch_shadow": "#CCA000",
+      "success": "#58CC02",
+      "success_shadow": "#46A302"
+    }
+  },
+  "spacing": {
+    "container_padding": "p-6 md:p-8 lg:p-12",
+    "section_gap": "gap-12 md:gap-16 lg:gap-24"
+  },
+  "surfaces_and_borders": {
+    "cards": "bg-white border-2 border-gray-200 rounded-3xl shadow-[0_8px_0_#e5e7eb] hover:translate-y-[2px] hover:shadow-[0_6px_0_#e5e7eb] transition-all",
+    "buttons": "rounded-2xl font-bold uppercase tracking-wide border-2 transition-all active:translate-y-[4px] active:shadow-none active:border-b-2"
+  },
+  "motion": {
+    "hover": "transform transition-all duration-200 ease-in-out",
+    "active": "active:scale-95",
+    "page_transition": "animate-in fade-in slide-in-from-bottom-4 duration-500"
+  },
+  "components": {
+    "primary_button": "bg-[#1CB0F6] text-white border-[#1CB0F6] border-b-[4px] border-b-[#1899D6] active:border-b-0 hover:brightness-110 flex justify-center items-center py-3 px-6",
+    "secondary_button": "bg-white text-[#1CB0F6] border-gray-200 border-b-[4px] active:border-b-0 hover:bg-gray-50 flex justify-center items-center py-3 px-6",
+    "category_card": "flex flex-col items-center justify-center p-8 bg-white border-2 border-gray-200 rounded-3xl shadow-[0_8px_0_#e5e7eb] cursor-pointer hover:-translate-y-1 hover:shadow-[0_12px_0_#e5e7eb] active:translate-y-[6px] active:shadow-[0_2px_0_#e5e7eb] transition-all",
+    "input_field": "w-full bg-gray-50 border-2 border-gray-200 rounded-2xl p-4 text-lg font-medium focus:border-[#1CB0F6] focus:ring-0 outline-none transition-colors",
+    "nav_bar": "sticky top-0 z-50 bg-white/90 backdrop-blur-xl border-b-2 border-gray-100 px-6 py-4 flex items-center justify-between"
+  },
+  "image_urls": {
+    "hero_image": {
+      "url": "https://images.unsplash.com/photo-1751644332113-2004a1b143f1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMDNkJTIwY29sb3JmdWwlMjBzaGFwZXN8ZW58MHx8fHwxNzc0OTUyNDY1fDA&ixlib=rb-4.1.0&q=85",
+      "description": "Colorful, 3D shapes arranged in a fun design. Perfect for the landing page hero abstract playful vibe.",
+      "category": "hero"
+    },
+    "category_read": {
+      "url": "https://images.unsplash.com/photo-1714146682506-d6f86fe8517a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjd8MHwxfHNlYXJjaHw0fHwzZCUyMGlsbHVzdHJhdGlvbiUyMG9yYW5nZSUyMGJvb2t8ZW58MHx8fHwxNzc0OTUyNTE2fDA&ixlib=rb-4.1.0&q=85",
+      "description": "3d yellow/orange book illustration",
+      "category": "categories"
+    },
+    "category_listen": {
+      "url": "https://images.unsplash.com/photo-1613040809024-b4ef7ba99bc3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAxODF8MHwxfHNlYXJjaHwyfHwzZCUyMGlsbHVzdHJhdGlvbiUyMGhlYWRwaG9uZXN8ZW58MHx8fHwxNzc0OTUyNTI5fDA&ixlib=rb-4.1.0&q=85",
+      "description": "pink and white wireless headphones",
+      "category": "categories"
+    },
+    "category_watch": {
+      "url": "https://images.pexels.com/photos/7991378/pexels-photo-7991378.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Close-up of popcorn and 3D glasses",
+      "category": "categories"
+    }
+  },
+  "layout": {
+    "container": "max-w-5xl mx-auto w-full",
+    "grid": "grid grid-cols-1 md:grid-cols-3 gap-6",
+    "bento_grid": "grid grid-cols-1 md:grid-cols-12 gap-6"
+  },
+  "icons": {
+    "library": "lucide-react",
+    "style": "stroke-[2.5px] text-current"
+  },
+  "accessibility": {
+    "contrast": "Ensure all text on bright colored buttons (like white text on orange/pink) meets contrast requirements. If needed, darken the button background slightly.",
+    "focus": "focus-visible:ring-4 focus-visible:ring-[#1CB0F6]/50 focus-visible:outline-none rounded-xl"
+  },
+  "instructions_to_main_agent": [
+    "Use the Nunito font for the body and Fredoka for all headings. Import them via Google Fonts in index.html.",
+    "Implement the Duolingo-style 'pushable' buttons using bottom borders (e.g., border-b-4) that disappear when active/pressed.",
+    "Cards and inputs should have heavily rounded corners (rounded-2xl or rounded-3xl).",
+    "Ensure all interactive elements have data-testid attributes for testing.",
+    "Do NOT use gamification elements (streaks, points, etc.) as the core product is non-gamified, but KEEP the playful, clean visual style.",
+    "Use pure HTML + Tailwind for structural layouts, heavily customize Shadcn components for forms, dialogs, etc., to match the heavily rounded, thick-bordered style.",
+    "Implement the 'Matching Pool with Waiting Animation' as a fun, bouncing 3D or CSS animation.",
+    "The 24h follow window should have a bold, large, clean countdown timer."
+  ]
+}
