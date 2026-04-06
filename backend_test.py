@@ -8,7 +8,7 @@ import os
 
 class RecommendMEAPITester:
     def __init__(self):
-        self.base_url = "https://smart-suggest-11.preview.emergentagent.com/api"
+        self.base_url = "https://pull-recommend.preview.emergentagent.com/api"
         self.session = requests.Session()
         self.admin_token = None
         self.user_token = None
