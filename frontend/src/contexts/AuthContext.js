@@ -43,7 +43,9 @@ export function AuthProvider({ children }) {
   };
 
   const loginAsGuest = async () => {
-    const { data } = await API.post("/auth/guest");
+    // Capture referral source if present
+    const referral = localStorage.getItem("rmq_referral") || "";
+    const { data } = await API.post("/auth/guest", { referral_source: referral });
     if (data.access_token) localStorage.setItem("access_token", data.access_token);
     localStorage.setItem("rmq_guest_id", data.guest_id);
     setUser(data.user);

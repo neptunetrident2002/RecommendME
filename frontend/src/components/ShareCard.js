@@ -1,10 +1,18 @@
 import { useRef, useState, useCallback } from "react";
 import { Download, Share2 } from "lucide-react";
+import API from "@/lib/api";
 
 const CARD_VARIANTS = {
   single_rec: "single_rec",
   blend_story: "blend_story",
   taste_stats: "taste_stats",
+};
+
+// Map variant to link_type for tracking
+const VARIANT_TO_LINK_TYPE = {
+  single_rec: "rec_card",
+  blend_story: "blend_card",
+  taste_stats: "stats_card",
 };
 
 const COLORS = {
@@ -212,10 +220,21 @@ export default function ShareCard({ variant = "single_rec", data = {} }) {
   const cardRef = useRef(null);
   const [generating, setGenerating] = useState(false);
 
+  const trackGeneration = useCallback(async () => {
+    try {
+      const linkType = VARIANT_TO_LINK_TYPE[variant] || "rec_card";
+      await API.post("/link-events", { link_type: linkType, event_type: "click" });
+    } catch {
+      // Silently fail tracking - don't block the user
+    }
+  }, [variant]);
+
   const generateImage = useCallback(async () => {
     if (!cardRef.current || generating) return;
     setGenerating(true);
     try {
+      // Track the card generation
+      trackGeneration();
       const html2canvas = (await import("html2canvas")).default;
       const canvas = await html2canvas(cardRef.current, {
         scale: 2, backgroundColor: "#FFFDF7", useCORS: true,
@@ -230,12 +249,14 @@ export default function ShareCard({ variant = "single_rec", data = {} }) {
     } finally {
       setGenerating(false);
     }
-  }, [variant, generating]);
+  }, [variant, generating, trackGeneration]);
 
   const shareImage = useCallback(async () => {
     if (!cardRef.current || generating) return;
     setGenerating(true);
     try {
+      // Track the card generation
+      trackGeneration();
       const html2canvas = (await import("html2canvas")).default;
       const canvas = await html2canvas(cardRef.current, {
         scale: 2, backgroundColor: "#FFFDF7", useCORS: true,

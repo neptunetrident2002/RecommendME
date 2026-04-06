@@ -1,11 +1,27 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { Navigate } from "react-router-dom";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, User } from "lucide-react";
+import { useState } from "react";
 
 export default function LandingPage() {
-  const { user, loading } = useAuth();
+  const { user, loading, loginAsGuest } = useAuth();
+  const navigate = useNavigate();
+  const [guestLoading, setGuestLoading] = useState(false);
+
   if (!loading && user) return <Navigate to="/home" replace />;
+
+  const handleGuestTry = async () => {
+    setGuestLoading(true);
+    try {
+      await loginAsGuest();
+      navigate("/home");
+    } catch (err) {
+      console.error("Guest session failed:", err);
+    } finally {
+      setGuestLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#FFFDF7]">
@@ -25,6 +41,18 @@ export default function LandingPage() {
             <Link to="/login" data-testid="landing-cta-login" className="bold-btn bold-btn-ghost px-8 py-4 text-lg">
               I already have an account
             </Link>
+          </div>
+          {/* Guest CTA */}
+          <div className="mt-6">
+            <button
+              onClick={handleGuestTry}
+              disabled={guestLoading}
+              data-testid="landing-cta-guest"
+              className="text-[#6b6b6b] hover:text-[#1a1a1a] text-sm font-body underline underline-offset-2 flex items-center gap-1.5 transition-colors"
+            >
+              <User size={14} />
+              {guestLoading ? "Setting up..." : "Try it — no account needed"}
+            </button>
           </div>
         </div>
       </section>

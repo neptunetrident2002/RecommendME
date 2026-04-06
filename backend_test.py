@@ -1,392 +1,249 @@
 #!/usr/bin/env python3
+"""
+Backend API Testing for RecommendME V6
+Tests health endpoint, cron endpoints, guest sessions, unsubscribe, and link events tracking.
+"""
 
-import requests
-import sys
+import asyncio
+import httpx
 import json
-from datetime import datetime
 import os
+from datetime import datetime
 
-class RecommendMEAPITester:
+# Configuration
+BACKEND_URL = "https://pull-recommend.preview.emergentagent.com"
+CRON_SECRET = "cron_secret_recommendme_v6_2026"
+ADMIN_EMAIL = "admin@recommendme.app"
+ADMIN_PASSWORD = "Admin123!"
+
+class BackendTester:
     def __init__(self):
-        self.base_url = "https://pull-recommend.preview.emergentagent.com/api"
-        self.session = requests.Session()
+        self.client = httpx.AsyncClient(timeout=30.0)
         self.admin_token = None
-        self.user_token = None
-        self.test_user_id = None
-        self.test_rec_id = None
-        self.test_match_id = None
-        self.tests_run = 0
-        self.tests_passed = 0
-        self.failed_tests = []
+        self.guest_token = None
+        self.guest_id = None
+        self.test_results = []
 
-    def log_test(self, name, success, details=""):
+    async def log_result(self, test_name: str, success: bool, details: str = ""):
         """Log test result"""
-        self.tests_run += 1
-        if success:
-            self.tests_passed += 1
-            print(f"✅ {name}")
-        else:
-            print(f"❌ {name} - {details}")
-            self.failed_tests.append({"test": name, "error": details})
+        status = "✅ PASS" if success else "❌ FAIL"
+        result = f"{status} {test_name}"
+        if details:
+            result += f" - {details}"
+        self.test_results.append(result)
+        print(result)
 
-    def make_request(self, method, endpoint, data=None, headers=None, expected_status=200):
-        """Make API request and return response"""
-        url = f"{self.base_url}{endpoint}"
-        req_headers = {"Content-Type": "application/json"}
-        if headers:
-            req_headers.update(headers)
-        
+    async def test_health_endpoint(self):
+        """Test GET /health and /api/health endpoints"""
         try:
-            if method == "GET":
-                response = self.session.get(url, headers=req_headers)
-            elif method == "POST":
-                response = self.session.post(url, json=data, headers=req_headers)
-            elif method == "PUT":
-                response = self.session.put(url, json=data, headers=req_headers)
-            elif method == "DELETE":
-                response = self.session.delete(url, headers=req_headers)
-            
-            success = response.status_code == expected_status
-            return success, response
+            # Test /api/health endpoint (this should work)
+            response = await self.client.get(f"{BACKEND_URL}/api/health")
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "ok":
+                    await self.log_result("Health endpoint (/api/health)", True, f"Status: {data['status']}")
+                    return True
+                else:
+                    await self.log_result("Health endpoint (/api/health)", False, f"Wrong status: {data}")
+                    return False
+            else:
+                await self.log_result("Health endpoint (/api/health)", False, f"Status code: {response.status_code}")
+                return False
         except Exception as e:
-            return False, str(e)
-
-    def test_admin_login(self):
-        """Test admin login"""
-        success, response = self.make_request("POST", "/auth/login", {
-            "email": "admin@recommendme.app",
-            "password": "Admin123!"
-        })
-        
-        if success and response.json().get("is_admin"):
-            self.admin_token = response.json().get("access_token")
-            # Don't update session headers here, we'll use specific headers for admin calls
-            self.log_test("Admin Login", True)
-            return True
-        else:
-            self.log_test("Admin Login", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+            await self.log_result("Health endpoint (/api/health)", False, f"Exception: {str(e)}")
             return False
 
-    def test_user_registration(self):
-        """Test user registration"""
-        timestamp = datetime.now().strftime("%H%M%S")
-        test_email = f"test_{timestamp}@test.com"
+    async def test_cron_endpoints_auth(self):
+        """Test cron endpoints require proper X-Cron-Secret header"""
+        endpoints = [
+            "/api/internal/cron/matching-queue",
+            "/api/internal/cron/follow-expiry", 
+            "/api/internal/cron/llm-fallback",
+            "/api/internal/cron/cleanup"
+        ]
         
-        success, response = self.make_request("POST", "/auth/register", {
-            "email": test_email,
-            "password": "TestPass123!",
-            "display_name": "Test User",
-            "city": "Test City"
-        }, expected_status=200)
+        all_passed = True
         
-        if success:
-            user_data = response.json()
-            self.user_token = user_data.get("access_token")
-            self.test_user_id = user_data.get("id")
-            self.log_test("User Registration", True)
-            return True
-        else:
-            self.log_test("User Registration", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-            return False
+        # Test without header (should return 403)
+        for endpoint in endpoints:
+            try:
+                response = await self.client.post(f"{BACKEND_URL}{endpoint}")
+                if response.status_code == 403:
+                    await self.log_result(f"Cron auth test {endpoint} (no header)", True, "Correctly returned 403")
+                else:
+                    await self.log_result(f"Cron auth test {endpoint} (no header)", False, f"Expected 403, got {response.status_code}")
+                    all_passed = False
+            except Exception as e:
+                await self.log_result(f"Cron auth test {endpoint} (no header)", False, f"Exception: {str(e)}")
+                all_passed = False
 
-    def test_auth_me(self):
-        """Test /auth/me endpoint"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("GET", "/auth/me", headers=headers)
-        
-        if success and response.json().get("email"):
-            self.log_test("Auth Me", True)
-            return True
-        else:
-            self.log_test("Auth Me", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-            return False
+        # Test with wrong header (should return 403)
+        for endpoint in endpoints:
+            try:
+                response = await self.client.post(f"{BACKEND_URL}{endpoint}", 
+                                                headers={"X-Cron-Secret": "wrong_secret"})
+                if response.status_code == 403:
+                    await self.log_result(f"Cron auth test {endpoint} (wrong header)", True, "Correctly returned 403")
+                else:
+                    await self.log_result(f"Cron auth test {endpoint} (wrong header)", False, f"Expected 403, got {response.status_code}")
+                    all_passed = False
+            except Exception as e:
+                await self.log_result(f"Cron auth test {endpoint} (wrong header)", False, f"Exception: {str(e)}")
+                all_passed = False
 
-    def test_create_recommendation(self):
-        """Test creating a recommendation"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("POST", "/recommendations", {
-            "title": "Test Book",
-            "author": "Test Author",
-            "category": "read",
-            "url": "https://example.com",
-            "why_note": "This is a test recommendation with more than 20 characters to meet the minimum requirement."
-        }, headers=headers, expected_status=200)
-        
-        if success:
-            self.test_rec_id = response.json().get("id")
-            self.log_test("Create Recommendation", True)
-            return True
-        else:
-            self.log_test("Create Recommendation", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-            return False
+        # Test with correct header (should return 200 with processed count)
+        for endpoint in endpoints:
+            try:
+                response = await self.client.post(f"{BACKEND_URL}{endpoint}", 
+                                                headers={"X-Cron-Secret": CRON_SECRET})
+                if response.status_code == 200:
+                    data = response.json()
+                    if "processed" in data:
+                        await self.log_result(f"Cron endpoint {endpoint}", True, f"Processed: {data['processed']}")
+                    else:
+                        await self.log_result(f"Cron endpoint {endpoint}", False, f"Missing 'processed' field: {data}")
+                        all_passed = False
+                else:
+                    await self.log_result(f"Cron endpoint {endpoint}", False, f"Status code: {response.status_code}, Response: {response.text}")
+                    all_passed = False
+            except Exception as e:
+                await self.log_result(f"Cron endpoint {endpoint}", False, f"Exception: {str(e)}")
+                all_passed = False
 
-    def test_get_my_recommendations(self):
-        """Test getting user's recommendations"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("GET", "/recommendations/mine", headers=headers)
-        
-        if success and isinstance(response.json(), list):
-            self.log_test("Get My Recommendations", True)
-            return True
-        else:
-            self.log_test("Get My Recommendations", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-            return False
+        return all_passed
 
-    def test_set_weekly_default(self):
-        """Test setting weekly default recommendation"""
-        if not self.test_rec_id:
-            self.log_test("Set Weekly Default", False, "No recommendation ID available")
-            return False
+    async def test_guest_session(self):
+        """Test POST /api/auth/guest endpoint"""
+        try:
+            response = await self.client.post(f"{BACKEND_URL}/api/auth/guest", 
+                                            json={"referral_source": "test_source"})
             
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("POST", "/recommendations/set-weekly-default", {
-            "recommendation_id": self.test_rec_id,
-            "category": "read"
-        }, headers=headers)
-        
-        if success:
-            self.log_test("Set Weekly Default", True)
-            return True
-        else:
-            self.log_test("Set Weekly Default", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+            if response.status_code == 200:
+                data = response.json()
+                required_fields = ["guest_id", "access_token", "user"]
+                
+                if all(field in data for field in required_fields):
+                    user = data["user"]
+                    if user.get("is_guest") == True:
+                        self.guest_token = data["access_token"]
+                        self.guest_id = data["guest_id"]
+                        await self.log_result("Guest session creation", True, f"Guest ID: {self.guest_id}")
+                        return True
+                    else:
+                        await self.log_result("Guest session creation", False, f"User is_guest not true: {user}")
+                        return False
+                else:
+                    await self.log_result("Guest session creation", False, f"Missing required fields: {data}")
+                    return False
+            else:
+                await self.log_result("Guest session creation", False, f"Status code: {response.status_code}, Response: {response.text}")
+                return False
+        except Exception as e:
+            await self.log_result("Guest session creation", False, f"Exception: {str(e)}")
             return False
 
-    def test_get_weekly_defaults(self):
-        """Test getting weekly defaults"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("GET", "/recommendations/weekly-defaults", headers=headers)
-        
-        if success:
-            data = response.json()
-            # Check if it has the expected structure with read/listen/watch categories
-            if isinstance(data, dict) and "read" in data and "listen" in data and "watch" in data:
-                self.log_test("Get Weekly Defaults", True)
+    async def test_unsubscribe_endpoint(self):
+        """Test GET /api/unsubscribe endpoint with invalid token"""
+        try:
+            # Test with invalid token (should return 400)
+            response = await self.client.get(f"{BACKEND_URL}/api/unsubscribe?uid=test_user_id&trigger=follow_warning&token=invalid_token")
+            
+            if response.status_code == 400:
+                await self.log_result("Unsubscribe invalid token", True, "Correctly returned 400 for invalid token")
                 return True
             else:
-                self.log_test("Get Weekly Defaults", False, "Invalid response structure")
+                await self.log_result("Unsubscribe invalid token", False, f"Expected 400, got {response.status_code}, Response: {response.text}")
                 return False
-        else:
-            self.log_test("Get Weekly Defaults", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+        except Exception as e:
+            await self.log_result("Unsubscribe invalid token", False, f"Exception: {str(e)}")
             return False
 
-    def test_matching_pool_operations(self):
-        """Test matching pool operations"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        
-        # Enter pool
-        success, response = self.make_request("POST", "/matching/enter", {
-            "category": "read",
-            "recommendation_id": self.test_rec_id
-        }, headers=headers)
-        
-        if success:
-            self.log_test("Enter Matching Pool", True)
-        else:
-            self.log_test("Enter Matching Pool", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+    async def test_link_events_tracking(self):
+        """Test POST /api/link-events endpoint (requires auth)"""
+        if not self.guest_token:
+            await self.log_result("Link events tracking", False, "No guest token available")
+            return False
+            
+        try:
+            response = await self.client.post(f"{BACKEND_URL}/api/link-events",
+                                            json={"link_type": "rec_card", "event_type": "click"},
+                                            headers={"Authorization": f"Bearer {self.guest_token}"})
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok") == True:
+                    await self.log_result("Link events tracking", True, "Successfully tracked link event")
+                    return True
+                else:
+                    await self.log_result("Link events tracking", False, f"Unexpected response: {data}")
+                    return False
+            else:
+                await self.log_result("Link events tracking", False, f"Status code: {response.status_code}, Response: {response.text}")
+                return False
+        except Exception as e:
+            await self.log_result("Link events tracking", False, f"Exception: {str(e)}")
             return False
 
-        # Check pool count - this endpoint doesn't exist, skip it
-        # success, response = self.make_request("GET", "/matching/pool-count/read")
-        # if success:
-        #     self.log_test("Pool Count", True)
-        # else:
-        #     self.log_test("Pool Count", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-
-        # Check match status
-        success, response = self.make_request("GET", "/matching/check", headers=headers)
-        if success:
-            self.log_test("Check Match Status", True)
-        else:
-            self.log_test("Check Match Status", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-
-        # Cancel matching
-        success, response = self.make_request("POST", "/matching/cancel", headers=headers)
-        if success:
-            self.log_test("Cancel Matching", True)
-        else:
-            self.log_test("Cancel Matching", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-
-        return True
-
-    def test_shareable_link(self):
-        """Test shareable link functionality"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        
-        # Generate link
-        success, response = self.make_request("POST", "/shareable-link/generate", headers=headers)
-        if success:
-            link_data = response.json()
-            token = link_data.get("token")
-            self.log_test("Generate Shareable Link", True)
+    async def test_link_events_no_auth(self):
+        """Test POST /api/link-events endpoint without auth (should fail)"""
+        try:
+            response = await self.client.post(f"{BACKEND_URL}/api/link-events",
+                                            json={"link_type": "rec_card", "event_type": "click"})
             
-            # Get link info
-            success, response = self.make_request("GET", f"/shareable-link/{token}")
-            if success:
-                self.log_test("Get Shareable Link Info", True)
+            if response.status_code == 401:
+                await self.log_result("Link events no auth", True, "Correctly returned 401 without auth")
+                return True
             else:
-                self.log_test("Get Shareable Link Info", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-            
-            # Submit via link
-            success, response = self.make_request("POST", f"/shareable-link/{token}/submit", {
-                "category": "read",
-                "title": "Anonymous Recommendation",
-                "author": "Anonymous Author",
-                "why_note": "This is an anonymous recommendation with sufficient characters to meet the minimum requirement."
-            })
-            if success:
-                self.log_test("Submit via Shareable Link", True)
-            else:
-                self.log_test("Submit via Shareable Link", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-                
-        else:
-            self.log_test("Generate Shareable Link", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-
-    def test_list_operations(self):
-        """Test list operations"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        
-        # Get list
-        success, response = self.make_request("GET", "/list", headers=headers)
-        if success:
-            self.log_test("Get My List", True)
-        else:
-            self.log_test("Get My List", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-
-        # Get list stats
-        success, response = self.make_request("GET", "/list/stats", headers=headers)
-        if success:
-            self.log_test("Get List Stats", True)
-        else:
-            self.log_test("Get List Stats", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-
-    def test_connections(self):
-        """Test connections endpoint"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("GET", "/connections", headers=headers)
-        
-        if success:
-            self.log_test("Get Connections", True)
-        else:
-            self.log_test("Get Connections", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-
-    def test_admin_endpoints(self):
-        """Test admin-only endpoints"""
-        if not self.admin_token:
-            self.log_test("Admin Endpoints", False, "No admin token available")
+                await self.log_result("Link events no auth", False, f"Expected 401, got {response.status_code}")
+                return False
+        except Exception as e:
+            await self.log_result("Link events no auth", False, f"Exception: {str(e)}")
             return False
+
+    async def run_all_tests(self):
+        """Run all backend tests"""
+        print(f"🚀 Starting RecommendME V6 Backend API Tests")
+        print(f"Backend URL: {BACKEND_URL}")
+        print(f"Timestamp: {datetime.now().isoformat()}")
+        print("=" * 60)
+
+        # Run tests in order
+        await self.test_health_endpoint()
+        await self.test_cron_endpoints_auth()
+        await self.test_guest_session()
+        await self.test_unsubscribe_endpoint()
+        await self.test_link_events_no_auth()
+        await self.test_link_events_tracking()
+
+        # Summary
+        print("\n" + "=" * 60)
+        print("📊 TEST SUMMARY")
+        print("=" * 60)
         
-        # Create a fresh session for admin requests to avoid token conflicts
-        admin_session = requests.Session()
-        headers = {"Authorization": f"Bearer {self.admin_token}", "Content-Type": "application/json"}
+        passed = sum(1 for result in self.test_results if "✅ PASS" in result)
+        failed = sum(1 for result in self.test_results if "❌ FAIL" in result)
         
-        # Admin metrics
-        try:
-            response = admin_session.get(f"{self.base_url}/admin/metrics", headers=headers)
-            if response.status_code == 200:
-                self.log_test("Admin Metrics", True)
-            else:
-                self.log_test("Admin Metrics", False, f"Status: {response.status_code}, Response: {response.text}")
-        except Exception as e:
-            self.log_test("Admin Metrics", False, f"Exception: {str(e)}")
-
-        # Admin users
-        try:
-            response = admin_session.get(f"{self.base_url}/admin/users", headers=headers)
-            if response.status_code == 200:
-                self.log_test("Admin Users", True)
-            else:
-                self.log_test("Admin Users", False, f"Status: {response.status_code}, Response: {response.text}")
-        except Exception as e:
-            self.log_test("Admin Users", False, f"Exception: {str(e)}")
-
-        # Admin reports
-        try:
-            response = admin_session.get(f"{self.base_url}/admin/reports", headers=headers)
-            if response.status_code == 200:
-                self.log_test("Admin Reports", True)
-            else:
-                self.log_test("Admin Reports", False, f"Status: {response.status_code}, Response: {response.text}")
-        except Exception as e:
-            self.log_test("Admin Reports", False, f"Exception: {str(e)}")
-
-    def test_logout(self):
-        """Test logout"""
-        headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("POST", "/auth/logout", headers=headers)
-        
-        if success:
-            self.log_test("Logout", True)
-        else:
-            self.log_test("Logout", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
-
-    def run_all_tests(self):
-        """Run all API tests"""
-        print("🚀 Starting RecommendME API Tests...")
-        print(f"📍 Testing against: {self.base_url}")
-        print("-" * 50)
-
-        # Auth tests
-        if not self.test_admin_login():
-            print("❌ Admin login failed - stopping admin tests")
-        
-        if not self.test_user_registration():
-            print("❌ User registration failed - stopping user tests")
-            return self.generate_report()
+        for result in self.test_results:
+            print(result)
             
-        self.test_auth_me()
+        print(f"\nTotal Tests: {len(self.test_results)}")
+        print(f"Passed: {passed}")
+        print(f"Failed: {failed}")
         
-        # Recommendation tests
-        self.test_create_recommendation()
-        self.test_get_my_recommendations()
-        self.test_set_weekly_default()
-        self.test_get_weekly_defaults()
-        
-        # Matching tests
-        self.test_matching_pool_operations()
-        
-        # Other features
-        self.test_shareable_link()
-        self.test_list_operations()
-        self.test_connections()
-        
-        # Admin tests
-        if self.admin_token:
-            self.test_admin_endpoints()
-        
-        # Cleanup
-        self.test_logout()
-        
-        return self.generate_report()
+        if failed == 0:
+            print("🎉 All tests passed!")
+        else:
+            print(f"⚠️  {failed} test(s) failed")
 
-    def generate_report(self):
-        """Generate test report"""
-        print("\n" + "=" * 50)
-        print("📊 TEST RESULTS")
-        print("=" * 50)
-        print(f"✅ Passed: {self.tests_passed}/{self.tests_run}")
-        print(f"❌ Failed: {len(self.failed_tests)}/{self.tests_run}")
-        
-        if self.failed_tests:
-            print("\n🔍 FAILED TESTS:")
-            for failure in self.failed_tests:
-                print(f"  • {failure['test']}: {failure['error']}")
-        
-        success_rate = (self.tests_passed / self.tests_run * 100) if self.tests_run > 0 else 0
-        print(f"\n📈 Success Rate: {success_rate:.1f}%")
-        
-        return {
-            "total_tests": self.tests_run,
-            "passed_tests": self.tests_passed,
-            "failed_tests": self.failed_tests,
-            "success_rate": success_rate
-        }
+        await self.client.aclose()
+        return failed == 0
 
-def main():
-    tester = RecommendMEAPITester()
-    results = tester.run_all_tests()
-    
-    # Return appropriate exit code
-    return 0 if results["success_rate"] >= 80 else 1
+async def main():
+    """Main test runner"""
+    tester = BackendTester()
+    success = await tester.run_all_tests()
+    return success
 
 if __name__ == "__main__":
-    sys.exit(main())
+    success = asyncio.run(main())
+    exit(0 if success else 1)

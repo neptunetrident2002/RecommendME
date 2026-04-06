@@ -61,7 +61,7 @@ if RESEND_API_KEY:
 # ── Genre normalisation ──
 GENRE_SUBSTITUTIONS = {
     "r&b": "rhythm and blues", "d&b": "drum and bass", "dnb": "drum and bass",
-    "dnb": "drum and bass", "2-step": "two step", "2step": "two step",
+    "2-step": "two step", "2step": "two step",
     "ukg": "uk garage", "bm": "black metal", "dm": "death metal",
     "gn": "graphic novel", "mg": "middle grade", "na": "new adult", "ya": "young adult",
 }
@@ -419,7 +419,8 @@ async def update_profile(body: ProfileUpdate, user: dict = Depends(get_current_u
             raise HTTPException(400, "Platform must be instagram, snapchat, or x")
         updates["social_platform"] = body.social_platform
     if body.email_opt_out is not None:
-        valid_triggers = list(EMAIL_TRIGGERS.keys()) + ["all"]
+        # Only allow opt-out for triggers that support it
+        valid_triggers = [k for k, v in EMAIL_TRIGGERS.items() if v] + ["all"]
         updates["email_opt_out"] = [t for t in body.email_opt_out if t in valid_triggers]
     if updates:
         await db.users.update_one({"_id": uid}, {"$set": updates})
@@ -481,8 +482,11 @@ async def google_callback(body: GoogleCallbackBody, response: Response):
     return {**user_to_public(user), "access_token": access}
 
 # ── ANONYMOUS GUEST SESSION ──
+class GuestSessionBody(BaseModel):
+    referral_source: Optional[str] = None
+
 @api.post("/auth/guest")
-async def create_guest_session():
+async def create_guest_session(body: GuestSessionBody = GuestSessionBody()):
     """Create an anonymous guest with localStorage UUID. 1 match allowed."""
     guest_id = f"guest_{uuid.uuid4().hex[:12]}"
     guest_doc = {
@@ -496,7 +500,7 @@ async def create_guest_session():
         "match_count": 0, "match_count_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "known_blend_invites_sent": 0,
         "social_handle": "", "social_platform": None,
-        "invited_by": None, "referral_source": "guest",
+        "invited_by": None, "referral_source": body.referral_source or "guest",
         "email_opt_out": [],
         "guest_id": guest_id,
         "guest_match_limit": 1,
@@ -780,7 +784,7 @@ async def get_exchange(match_id: str, user: dict = Depends(get_current_user)):
 
 # ── FOLLOW & CONNECTIONS ──
 @api.post("/follow")
-async def follow_user(body: FollowBody, user: dict = Depends(get_current_user)):
+async def follow_user(body: FollowBody, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     match = await db.matches.find_one({"_id": ObjectId(body.match_id)})
     if not match:
         raise HTTPException(404, "Match not found")
@@ -822,6 +826,10 @@ async def follow_user(body: FollowBody, user: dict = Depends(get_current_user)):
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
             await db.matches.update_one({"_id": ObjectId(body.match_id)}, {"$set": {"status": "completed"}})
+            # Send connection formed emails to both users
+            other_user = await db.users.find_one({"_id": ObjectId(other_user_id)})
+            background_tasks.add_task(send_email_connection_formed, user["_id"], other_user.get("display_name", "") if other_user else "")
+            background_tasks.add_task(send_email_connection_formed, other_user_id, user.get("display_name", ""))
         return {"ok": True, "connection_formed": True}
     return {"ok": True, "connection_formed": False}
 
@@ -1011,6 +1019,8 @@ async def respond_to_broadcast(body: BroadcastResponseBody, background_tasks: Ba
     })
     if not genre and groq_client:
         background_tasks.add_task(infer_genre_async, rec_id, body.title, body.author or "")
+    # Send email to broadcast owner
+    background_tasks.add_task(send_email_broadcast_response, broadcast["user_id"])
     return {"ok": True}
 
 @api.post("/broadcasts/{broadcast_id}/close")
@@ -1166,7 +1176,7 @@ async def get_shareable_link(token: str):
     return {"token": token, "owner_display_name": owner.get("display_name", "Someone") if owner else "Someone"}
 
 @api.post("/shareable-link/{token}/submit")
-async def submit_via_link(token: str, body: LinkSubmission, request: Request):
+async def submit_via_link(token: str, body: LinkSubmission, request: Request, background_tasks: BackgroundTasks):
     if len(body.why_note) < 20:
         raise HTTPException(400, "Why-note must be at least 20 characters")
     link = await db.shareable_links.find_one({"token": token})
@@ -1192,6 +1202,8 @@ async def submit_via_link(token: str, body: LinkSubmission, request: Request):
         "completion_status": "not_started", "completion_date": None,
         "user_comment": "", "is_archived": False, "show_note_publicly": True,
     })
+    # Send email notification
+    background_tasks.add_task(send_email_link_submission, link["user_id"])
     return {"ok": True}
 
 # ── REC EXCHANGE LINKS (Type 2) ──
@@ -1236,7 +1248,7 @@ async def get_rec_exchange_link(token: str):
     return {"token": token, "owner_display_name": owner.get("display_name", "Someone") if owner else "Someone"}
 
 @api.post("/rec-exchange-link/{token}/submit")
-async def submit_rec_exchange(token: str, body: RecExchangeSubmission, request: Request):
+async def submit_rec_exchange(token: str, body: RecExchangeSubmission, request: Request, background_tasks: BackgroundTasks):
     if len(body.why_note) < 20:
         raise HTTPException(400, "Why-note must be at least 20 characters")
     link = await db.rec_exchange_links.find_one({"token": token, "is_active": True})
@@ -1265,6 +1277,13 @@ async def submit_rec_exchange(token: str, body: RecExchangeSubmission, request: 
         "completion_status": "not_started", "completion_date": None,
         "user_comment": "", "is_archived": False, "show_note_publicly": True,
     })
+    # Fibonacci threshold email notification for Type 2
+    total_submissions = await db.link_submissions.count_documents({"rec_exchange_link_id": str(link["_id"])})
+    last_notified = link.get("last_notified_count", 0)
+    next_threshold = get_next_fibonacci_threshold(total_submissions, last_notified)
+    if next_threshold > 0:
+        await db.rec_exchange_links.update_one({"_id": link["_id"]}, {"$set": {"last_notified_count": next_threshold}})
+        background_tasks.add_task(send_email_exchange_link_threshold, link["user_id"], next_threshold)
     # Return the sharer's frozen rec as reward
     reward_rec = None
     if link.get("rec_id"):
@@ -1324,7 +1343,7 @@ async def get_known_blend_invite(token: str):
     return {"token": token, "inviter_name": inviter.get("display_name", "Someone") if inviter else "Someone"}
 
 @api.post("/known-blend/accept")
-async def accept_known_blend_invite(body: KnownBlendInviteAccept, user: dict = Depends(get_current_user)):
+async def accept_known_blend_invite(body: KnownBlendInviteAccept, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     inv = await db.known_blend_invites.find_one({"token": body.token, "status": "pending"})
     if not inv:
         raise HTTPException(404, "Invite not found or already used")
@@ -1346,6 +1365,8 @@ async def accept_known_blend_invite(body: KnownBlendInviteAccept, user: dict = D
         "blend_id": str(blend_result.inserted_id), "status": "accepted",
     }})
     await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$set": {"invited_by": inv["inviter_id"]}})
+    # Send email to inviter
+    background_tasks.add_task(send_email_known_blend_accepted, inv["inviter_id"], user.get("display_name", ""))
     return {"ok": True, "blend_token": blend_token}
 
 # ── BLENDS ──
@@ -1395,7 +1416,7 @@ async def get_blend_by_token(token: str, user: dict = Depends(get_optional_user)
     }
 
 @api.post("/blends/{blend_id}/toggle-public")
-async def toggle_blend_public(blend_id: str, user: dict = Depends(get_current_user)):
+async def toggle_blend_public(blend_id: str, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     blend = await db.blends.find_one({"_id": ObjectId(blend_id)})
     if not blend:
         raise HTTPException(404, "Blend not found")
@@ -1403,6 +1424,10 @@ async def toggle_blend_public(blend_id: str, user: dict = Depends(get_current_us
         raise HTTPException(403, "Not your blend")
     new_val = not blend.get("is_public", False)
     await db.blends.update_one({"_id": ObjectId(blend_id)}, {"$set": {"is_public": new_val}})
+    # Send email to both users when blend is made public
+    if new_val:
+        background_tasks.add_task(send_email_blend_public, blend["user_a_id"], blend.get("public_token", ""))
+        background_tasks.add_task(send_email_blend_public, blend["user_b_id"], blend.get("public_token", ""))
     return {"ok": True, "is_public": new_val}
 
 @api.post("/blends/{blend_id}/recompute")
@@ -1435,7 +1460,7 @@ async def create_report(body: ReportCreate, user: dict = Depends(get_current_use
 
 # ── WAITLIST ──
 @api.post("/waitlist")
-async def join_waitlist(body: WaitlistBody):
+async def join_waitlist(body: WaitlistBody, background_tasks: BackgroundTasks):
     existing = await db.waitlist.find_one({"email": body.email.strip().lower()})
     if existing:
         return {"ok": True, "message": "You're in the list."}
@@ -1444,6 +1469,8 @@ async def join_waitlist(body: WaitlistBody):
         "referral_source": body.referral_source or "pro_modal",
         "created_at": datetime.now(timezone.utc).isoformat(), "invited_at": None,
     })
+    # Send confirmation email
+    background_tasks.add_task(send_email_pro_waitlist_join, body.email.strip().lower())
     return {"ok": True, "message": "You're in the list."}
 
 # ── PUBLIC TASTE PAGE ──
@@ -1678,6 +1705,15 @@ async def generate_llm_fallback(user_id: str, category: str, request_note: str =
     if not groq_client:
         return
     try:
+        # Rate limit: 1 LLM fallback per user per 24 hours
+        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        recent_fallback = await db.matches.find_one({
+            "user_a_id": user_id, "is_llm_fallback": True,
+            "created_at": {"$gt": cutoff_24h}
+        })
+        if recent_fallback:
+            logger.info(f"LLM fallback skipped for {user_id}: already received one in last 24h")
+            return
         system_prompt = f"""You are writing a single {category} recommendation as a thoughtful human. Write in first person with genuine emotional reflection. Not a review or description — a personal, specific reason this changed you. Return JSON: {{"title": "...", "author": "...", "why_note": "...", "genre": "..."}}"""
         user_msg = f"Give one {category} recommendation."
         if request_note:
@@ -1716,6 +1752,8 @@ async def generate_llm_fallback(user_id: str, category: str, request_note: str =
             "user_comment": "", "is_archived": False, "show_note_publicly": True,
         })
         await db.matching_pool.delete_many({"user_id": user_id})
+        # Send email notification
+        await send_email_match_ready(user_id)
     except Exception as e:
         logger.warning(f"LLM fallback failed for {user_id}: {e}")
 
@@ -1745,27 +1783,253 @@ async def send_triggered_email(user_id: str, trigger: str, subject: str, html: s
     except Exception as e:
         logger.warning(f"Triggered email failed ({trigger}): {e}")
 
-# Email trigger constants
+# Email trigger constants (opt-outable ones marked)
 EMAIL_TRIGGERS = {
-    "welcome": "Welcome to RecommendME",
-    "match_found": "You have a new match!",
-    "match_revealed": "Your match has been revealed",
-    "new_follower": "Someone followed you",
-    "connection_formed": "New connection formed!",
-    "broadcast_response": "Someone responded to your broadcast",
-    "exchange_link_activity": "New submission on your exchange link",
-    "blend_score_ready": "Your blend score is ready",
-    "weekly_digest": "Your weekly RecommendME digest",
-    "inactivity_nudge": "We miss you on RecommendME",
+    "match_ready": False,  # "Your match is ready." - No opt-out
+    "follow_warning": True,  # "Still thinking about it?" - Opt-outable
+    "connection_formed": False,  # "You're connected." - No opt-out
+    "blend_public": True,  # "Your blend is live." - Opt-outable
+    "broadcast_response": True,  # "Someone responded to your request." - Opt-outable
+    "link_submission": True,  # "Someone left you a recommendation." - Opt-outable
+    "exchange_link_activity": True,  # "Your exchange link is getting responses." - Opt-outable
+    "known_blend_accepted": True,  # "They joined your blend." - Opt-outable
+    "waitlist_invite": False,  # "You're in. Here's your link." - No opt-out
+    "pro_waitlist_join": False,  # "We've saved your spot." - No opt-out
 }
 
-def email_html_wrap(title: str, body: str) -> str:
+# Fibonacci thresholds for Type 2 rec exchange link notifications
+FIBONACCI_THRESHOLDS = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
+
+def get_next_fibonacci_threshold(current_count: int, last_notified: int) -> int:
+    """Returns the next threshold to notify at, or 0 if no notification needed."""
+    for thresh in FIBONACCI_THRESHOLDS:
+        if thresh > last_notified and current_count >= thresh:
+            # Find highest crossed threshold
+            highest = thresh
+            for t in FIBONACCI_THRESHOLDS:
+                if t > last_notified and current_count >= t:
+                    highest = t
+            return highest
+    return 0
+
+def email_html_wrap(title: str, body: str, unsubscribe_link: str = None) -> str:
+    footer = '<p style="color:#6b6b6b;font-size:12px;">RecommendME &mdash; a human-filtered taste exchange.</p>'
+    if unsubscribe_link:
+        footer = f'<p style="color:#6b6b6b;font-size:12px;">RecommendME &mdash; a human-filtered taste exchange.<br/><a href="{unsubscribe_link}" style="color:#6b6b6b;text-decoration:underline;">Unsubscribe from these emails</a></p>'
     return f"""<div style="font-family:'Nunito',sans-serif;max-width:480px;margin:0 auto;padding:24px;background:#FFFDF7;">
 <h2 style="font-family:'Fredoka',sans-serif;color:#1a1a1a;font-size:22px;margin:0 0 16px;">{title}</h2>
 <div style="color:#333;font-size:15px;line-height:1.6;">{body}</div>
 <hr style="border:none;border-top:2px solid #1a1a1a;margin:24px 0 16px;"/>
-<p style="color:#6b6b6b;font-size:12px;">RecommendME &mdash; a human-filtered taste exchange.</p>
+{footer}
 </div>"""
+
+def get_unsubscribe_link(user_id: str, trigger: str) -> str:
+    """Generate unsubscribe link for opt-outable emails."""
+    token = hashlib.sha256(f"{user_id}:{trigger}:{get_jwt_secret()}".encode()).hexdigest()[:24]
+    return f"{FRONTEND_URL}/unsubscribe?uid={user_id}&trigger={trigger}&token={token}"
+
+async def send_email_match_ready(user_id: str):
+    """Async match found (user in pool 60s+, match then found)"""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        body = "Your match has arrived. Head over to RecommendME to see what someone picked for you."
+        html = email_html_wrap("Your match is ready", body)
+        await send_email_async(user["email"], "Your match is ready", html)
+    except Exception as e:
+        logger.warning(f"Email match_ready failed: {e}")
+
+async def send_email_follow_warning(user_id: str, match_id: str):
+    """Follow window 2h warning (if opted in)"""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "email_opt_out": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        opt_out = user.get("email_opt_out", [])
+        if "follow_warning" in opt_out or "all" in opt_out:
+            return
+        unsub = get_unsubscribe_link(user_id, "follow_warning")
+        body = "You have a few hours left to follow back from your recent exchange. No pressure, just a gentle reminder."
+        html = email_html_wrap("Still thinking about it", body, unsub)
+        await send_email_async(user["email"], "Still thinking about it", html)
+    except Exception as e:
+        logger.warning(f"Email follow_warning failed: {e}")
+
+async def send_email_connection_formed(user_id: str, other_name: str):
+    """Connection formed - both users followed"""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        body = f"You and {other_name or 'someone'} are now connected. You can exchange recommendations anytime."
+        html = email_html_wrap("You're connected", body)
+        await send_email_async(user["email"], "You're connected", html)
+    except Exception as e:
+        logger.warning(f"Email connection_formed failed: {e}")
+
+async def send_email_blend_public(user_id: str, blend_token: str):
+    """Blend made public"""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "email_opt_out": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        opt_out = user.get("email_opt_out", [])
+        if "blend_public" in opt_out or "all" in opt_out:
+            return
+        unsub = get_unsubscribe_link(user_id, "blend_public")
+        body = "Your blend is now visible to anyone with the link. Share it if you like."
+        html = email_html_wrap("Your blend is live", body, unsub)
+        await send_email_async(user["email"], "Your blend is live", html)
+    except Exception as e:
+        logger.warning(f"Email blend_public failed: {e}")
+
+async def send_email_broadcast_response(user_id: str):
+    """Broadcast response received"""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "email_opt_out": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        opt_out = user.get("email_opt_out", [])
+        if "broadcast_response" in opt_out or "all" in opt_out:
+            return
+        unsub = get_unsubscribe_link(user_id, "broadcast_response")
+        body = "Someone responded to your request with a recommendation. Check your list."
+        html = email_html_wrap("Someone responded to your request", body, unsub)
+        await send_email_async(user["email"], "Someone responded to your request", html)
+    except Exception as e:
+        logger.warning(f"Email broadcast_response failed: {e}")
+
+async def send_email_link_submission(user_id: str):
+    """Type 1 link submission received"""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "email_opt_out": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        opt_out = user.get("email_opt_out", [])
+        if "link_submission" in opt_out or "all" in opt_out:
+            return
+        unsub = get_unsubscribe_link(user_id, "link_submission")
+        body = "Someone left you a recommendation through your link. Check your list to see what they shared."
+        html = email_html_wrap("Someone left you a recommendation", body, unsub)
+        await send_email_async(user["email"], "Someone left you a recommendation", html)
+    except Exception as e:
+        logger.warning(f"Email link_submission failed: {e}")
+
+async def send_email_exchange_link_threshold(user_id: str, count: int):
+    """Type 2 Fibonacci threshold crossed"""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "email_opt_out": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        opt_out = user.get("email_opt_out", [])
+        if "exchange_link_activity" in opt_out or "all" in opt_out:
+            return
+        unsub = get_unsubscribe_link(user_id, "exchange_link_activity")
+        body = f"Your exchange link has received {count} responses. People are sharing recommendations with you."
+        html = email_html_wrap("Your exchange link is getting responses", body, unsub)
+        await send_email_async(user["email"], "Your exchange link is getting responses", html)
+    except Exception as e:
+        logger.warning(f"Email exchange_link_activity failed: {e}")
+
+async def send_email_known_blend_accepted(user_id: str, accepter_name: str):
+    """Known blend invite accepted"""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "email_opt_out": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        opt_out = user.get("email_opt_out", [])
+        if "known_blend_accepted" in opt_out or "all" in opt_out:
+            return
+        unsub = get_unsubscribe_link(user_id, "known_blend_accepted")
+        body = f"{accepter_name or 'Someone'} accepted your blend invite. Your taste comparison is ready."
+        html = email_html_wrap("They joined your blend", body, unsub)
+        await send_email_async(user["email"], "They joined your blend", html)
+    except Exception as e:
+        logger.warning(f"Email known_blend_accepted failed: {e}")
+
+async def send_email_waitlist_invite(email: str, invite_link: str):
+    """Waitlist invite (admin-triggered)"""
+    try:
+        body = f"You're in. Here's your link to get started: <a href=\"{invite_link}\">{invite_link}</a>"
+        html = email_html_wrap("You're in", body)
+        await send_email_async(email, "You're in", html)
+    except Exception as e:
+        logger.warning(f"Email waitlist_invite failed: {e}")
+
+async def send_email_pro_waitlist_join(email: str):
+    """Pro waitlist join confirmation"""
+    try:
+        body = "We've saved your spot on the Pro waitlist. We'll let you know when it's your turn."
+        html = email_html_wrap("We've saved your spot", body)
+        await send_email_async(email, "We've saved your spot", html)
+    except Exception as e:
+        logger.warning(f"Email pro_waitlist_join failed: {e}")
+
+# ── UNSUBSCRIBE ENDPOINT ──
+class UnsubscribeBody(BaseModel):
+    uid: str
+    trigger: str
+    token: str
+
+@api.post("/unsubscribe")
+async def unsubscribe(body: UnsubscribeBody):
+    """Unsubscribe from a specific email trigger type."""
+    # Verify token
+    expected = hashlib.sha256(f"{body.uid}:{body.trigger}:{get_jwt_secret()}".encode()).hexdigest()[:24]
+    if body.token != expected:
+        raise HTTPException(400, "Invalid unsubscribe link")
+    # Check if trigger is opt-outable
+    if body.trigger not in EMAIL_TRIGGERS or not EMAIL_TRIGGERS.get(body.trigger):
+        raise HTTPException(400, "Cannot unsubscribe from this email type")
+    try:
+        user = await db.users.find_one({"_id": ObjectId(body.uid)})
+        if not user:
+            raise HTTPException(404, "User not found")
+        opt_out = user.get("email_opt_out", [])
+        if body.trigger not in opt_out:
+            opt_out.append(body.trigger)
+            await db.users.update_one({"_id": ObjectId(body.uid)}, {"$set": {"email_opt_out": opt_out}})
+        return {"ok": True, "message": f"Unsubscribed from {body.trigger} emails"}
+    except Exception as e:
+        logger.warning(f"Unsubscribe failed: {e}")
+        raise HTTPException(500, "Failed to unsubscribe")
+
+@api.get("/unsubscribe")
+async def unsubscribe_get(uid: str, trigger: str, token: str):
+    """GET endpoint for unsubscribe links in emails."""
+    expected = hashlib.sha256(f"{uid}:{trigger}:{get_jwt_secret()}".encode()).hexdigest()[:24]
+    if token != expected:
+        raise HTTPException(400, "Invalid unsubscribe link")
+    if trigger not in EMAIL_TRIGGERS or not EMAIL_TRIGGERS.get(trigger):
+        raise HTTPException(400, "Cannot unsubscribe from this email type")
+    try:
+        user = await db.users.find_one({"_id": ObjectId(uid)})
+        if not user:
+            raise HTTPException(404, "User not found")
+        opt_out = user.get("email_opt_out", [])
+        if trigger not in opt_out:
+            opt_out.append(trigger)
+            await db.users.update_one({"_id": ObjectId(uid)}, {"$set": {"email_opt_out": opt_out}})
+        return {"ok": True, "message": "You've been unsubscribed from these emails."}
+    except Exception:
+        raise HTTPException(500, "Failed to unsubscribe")
+
+# ── LINK EVENTS TRACKING ──
+class LinkEventBody(BaseModel):
+    link_type: str  # 'rec_card' | 'blend_card' | 'stats_card'
+    event_type: str = "click"
+
+@api.post("/link-events")
+async def track_link_event(body: LinkEventBody, user: dict = Depends(get_current_user)):
+    """Track shareable card generation events."""
+    await db.link_events.insert_one({
+        "user_id": user["_id"],
+        "link_type": body.link_type,
+        "event_type": body.event_type,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"ok": True}
 
 # ── Include Router ──
 app.include_router(api)
@@ -1845,7 +2109,7 @@ async def cron_llm_fallback(_=Depends(verify_cron_secret)):
     })
     return {"processed": processed, "errors": errors}
 
-# ── CRON: CLEANUP (expired links, old pool entries, stale data) ──
+# ── CRON: CLEANUP (expired links, old pool entries, stale data, old cron_logs) ──
 @cron_router.post("/cleanup")
 async def cron_cleanup(_=Depends(verify_cron_secret)):
     now = datetime.now(timezone.utc)
@@ -1863,6 +2127,10 @@ async def cron_cleanup(_=Depends(verify_cron_secret)):
     cutoff_1h = (now - timedelta(hours=1)).isoformat()
     old_attempts = await db.login_attempts.delete_many({"locked_until": {"$lt": cutoff_1h}})
     processed += old_attempts.deleted_count
+    # Delete cron_logs older than 14 days
+    cutoff_14d = (now - timedelta(days=14)).isoformat()
+    old_logs = await db.cron_logs.delete_many({"ran_at": {"$lt": cutoff_14d}})
+    processed += old_logs.deleted_count
     await db.cron_logs.insert_one({
         "job_name": "cleanup", "records_processed": processed,
         "errors": 0, "ran_at": now_iso,
