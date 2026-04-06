@@ -1,80 +1,75 @@
-# RecommendME — PRD & Implementation Tracker
+# RecommendME V6 — PRD & Implementation Tracker
 
 ## Original Problem Statement
-Build RecommendME - a human-filtered taste exchange web app based on the detailed PRD. One stranger, one category (Read/Listen/Watch), one recommendation each, 24-hour follow window. Duolingo-inspired UI.
+RecommendME V6 rebuild following the detailed V6 prompt document. Complete structural overhaul with bold flat design, new features (weekly defaults, genre, blends, broadcasts, blocking, rec exchange links, public taste pages, known blend invites), Groq LLM integration, and Resend email preparation.
 
 ## Architecture
 - **Frontend**: React + Tailwind CSS + Shadcn UI (port 3000)
 - **Backend**: FastAPI + Motor (async MongoDB) (port 8001)
 - **Database**: MongoDB
-- **Auth**: JWT-based email/password with httpOnly cookies + localStorage fallback
-- **Design**: Duolingo-inspired — Fredoka headings, Nunito body, bright playful colors (#1CB0F6 primary, category colors: Orange/Pink/Yellow)
+- **Auth**: JWT-based email/password (httpOnly cookies + localStorage fallback)
+- **LLM**: Groq API (llama-3.3-70b-versatile) for genre inference, taste scoring (blends), LLM fallback recommendations
+- **Email**: Resend (configured, needs API key to activate)
+- **Design**: Bold Flat — 2px #1a1a1a borders, 4px offset shadows, #FFFDF7 warm bg, Fredoka + Nunito, no images
 
-## User Personas
-1. **Free Registered User** — 3 matches, full access to list, follow, connections
-2. **Pro User** — Unlimited matches (deferred - Stripe integration)
-3. **Guest User** — Anonymous via shareable link (deferred - full guest flow)
-4. **Admin** — Dashboard at /admin with metrics, reports, user management
+## What's Been Implemented (V6 - April 6, 2026)
 
-## Core Requirements (Static)
-- Category selection: Read / Listen / Watch
-- Give-first mechanic: user must provide recommendation before receiving
-- Why-note: minimum 20 characters explaining personal significance
-- 24-hour follow window with countdown
-- Mutual follow creates permanent connection
-- Personal recommendation list with filters (category, status, source, search)
-- Shareable link for anonymous recommendation submission
-- Admin dashboard with metrics, reports, user banning
+### Design System (Layer 15)
+- Bold flat: 2px hard borders, 4px 4px 0 offset shadows (never blurred)
+- Page bg: #FFFDF7 (warm off-white, never pure white)
+- Card bg: #FFFFFF with hard shadow
+- Press animation: translate(4px, 4px) + shadow:none
+- No images anywhere — purely typographic
+- Bottom navigation (4 tabs: Home, List, Connections, Profile)
+- Sentence case only
 
-## What's Been Implemented (April 5, 2026)
-### Backend (server.py)
-- JWT auth (register, login, logout, me, refresh, profile update)
-- Admin seeding with brute force protection
-- Recommendations CRUD (create, set default, list mine)
-- Matching pool system (enter, check, cancel, write-rec, reveal)
-- Follow & connections (follow, list, disconnect)
-- The List (get with filters, update entry, stats)
-- Shareable links (generate, get, submit)
-- Reports (create, admin view, resolve)
-- Admin (metrics, reports, users, ban/unban)
-- MongoDB indexes on email, login_attempts, matching_pool, shareable_links
+### Backend (Layers 1-12)
+- Auth with admin seeding, brute force protection (Layer 2)
+- Weekly defaults per category with 168h expiry (Layer 2.5)
+- Genre normalization with Groq auto-inference (Layer 6)
+- Matching pool with block/report exclusion, daily match cap 3/10 (Layer 3)
+- Exchange state machine: pending → active → completed (Layer 4)
+- Follow window 24h, mutual follow → connection + blend creation (Layer 5)
+- Groq: genre inference, blend taste scoring, LLM fallback generation (Layer 6)
+- Resend: email helper configured (Layer 7)
+- Known blend invites (2 slots, 72h expiry) (Layer 8)
+- Social handle reveal after 7 exchanges (Layer 9)
+- Block system (severs connections, archives entries) (Layer 10)
+- Connection exchanges + broadcasts with view tracking (Layer 11)
+- Rec exchange links Type 2 (NGL-style, 72h expiry) (Layer 12)
+- Public taste page (/u/[handle]) (Layer 13)
+- Admin dashboard (numbers only, no charts) with key metrics
 
-### Frontend Pages
-- Landing page (hero, how-it-works, category preview)
-- Login / Register pages
-- Home dashboard (category selector, default rec, match CTA, share link)
-- Matching screen (ambient animation, pool count, timer, async notice)
-- Exchange reveal (dual-card reveal, follow button, countdown, report)
-- My List (filters, search, status badges, edit dialog, archive)
-- Connections page (list, disconnect)
-- Admin dashboard (tabs: metrics, reports, users)
-- Shareable link page (/r/:token — anonymous submission + reward)
-
-### Design System
-- Fonts: Fredoka (headings) + Nunito (body) via Google Fonts
-- Colors: Brand Blue #1CB0F6, Read Orange #FF9600, Listen Pink #FF4B4B, Watch Yellow #FFC800, Success Green #58CC02
-- Pushable buttons (border-b-4/5 with active translate)
-- Rounded-3xl cards with drop shadows
-- All interactive elements have data-testid attributes
+### Frontend Pages (Layer 15)
+- Landing (typographic hero)
+- Login / Register (bold flat forms)
+- Home (category buttons, weekly defaults, match CTA)
+- Matching screen (ambient animation, no pool count)
+- Exchange reveal (state-aware, follow/downvote/report)
+- My List (tabs: Received / My additions, filters, edit)
+- Connections (tabs: Connections / Broadcasts / Blends)
+- Profile (settings, links, known invites, blocks, logout)
+- Admin (metrics / reports / users tabs)
+- Shareable link (/r/:token)
+- Rec exchange (/x/:token)
+- Public taste page (/u/:handle)
+- Known blend invite (/blend-invite/:token)
 
 ## Prioritized Backlog
 
 ### P0 (Next)
-- LLM fallback with Claude Sonnet (when no match within 24h)
-- Email notifications via Resend (match found, follow window, connection)
-- Real-time matching with WebSocket/polling improvements
+- Activate Resend with API key for email notifications
+- Shareable card export (html2canvas)
+- LLM fallback cron job (trigger after 24h in pool)
+- Pro/waitlist modal on match limit
 
 ### P1
+- Fibonacci batch email scheduling
+- OG meta tags for shared links
+- PWA installability
 - Sub-categories within Read/Listen/Watch
-- Broadcast requests to connections
-- Collaborative lists between connections
-- Social card export (PNG via html2canvas)
-- OG link preview component
 
 ### P2
-- Pro subscription with Stripe billing
-- Guest user flow (anonymous match via Supabase-style anon sessions)
-- Waitlist system with invite emails
-- Taste profile quarterly reflection
-- Public shareable lists
-- PWA installability
+- Stripe Pro subscription
+- Dark mode (V6 doc says NOT to build)
+- External metadata API for URL previews
