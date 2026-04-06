@@ -19,6 +19,12 @@ export function AuthProvider({ children }) {
   }, []);
 
   useEffect(() => {
+    // CRITICAL: If returning from OAuth callback, skip the /me check.
+    // AuthCallback will exchange the session_id and establish the session first.
+    if (window.location.hash?.includes("session_id=")) {
+      setLoading(false);
+      return;
+    }
     checkAuth();
   }, [checkAuth]);
 
@@ -29,16 +35,39 @@ export function AuthProvider({ children }) {
     return data;
   };
 
-  const register = async (email, password, display_name, city) => {
-    const { data } = await API.post("/auth/register", { email, password, display_name, city });
+  const register = async (email, password, display_name, city, referral_source) => {
+    const { data } = await API.post("/auth/register", { email, password, display_name, city, referral_source });
     if (data.access_token) localStorage.setItem("access_token", data.access_token);
     setUser(data);
     return data;
   };
 
+  const loginAsGuest = async () => {
+    const { data } = await API.post("/auth/guest");
+    if (data.access_token) localStorage.setItem("access_token", data.access_token);
+    localStorage.setItem("rmq_guest_id", data.guest_id);
+    setUser(data.user);
+    return data;
+  };
+
+  const convertGuest = async (guestId, email, password, display_name, city) => {
+    const { data } = await API.post("/auth/convert-guest", {
+      guest_id: guestId, email, password, display_name, city,
+    });
+    if (data.access_token) localStorage.setItem("access_token", data.access_token);
+    localStorage.removeItem("rmq_guest_id");
+    setUser(data);
+    return data;
+  };
+
+  const googleLogin = async (sessionData) => {
+    setUser(sessionData);
+  };
+
   const logout = async () => {
     try { await API.post("/auth/logout"); } catch {}
     localStorage.removeItem("access_token");
+    localStorage.removeItem("rmq_guest_id");
     setUser(false);
   };
 
@@ -49,7 +78,10 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, updateProfile, checkAuth }}>
+    <AuthContext.Provider value={{
+      user, loading, login, register, loginAsGuest, convertGuest,
+      googleLogin, logout, updateProfile, checkAuth,
+    }}>
       {children}
     </AuthContext.Provider>
   );

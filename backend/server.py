@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, BackgroundTasks, Header
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
@@ -17,6 +17,8 @@ import secrets
 import hashlib
 import json
 import asyncio
+import httpx
+import uuid
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timezone, timedelta
@@ -29,6 +31,8 @@ JWT_ALGORITHM = "HS256"
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -151,6 +155,9 @@ def user_to_public(user: dict) -> dict:
         "known_blend_invites_sent": user.get("known_blend_invites_sent", 0),
         "social_handle": user.get("social_handle", ""),
         "social_platform": user.get("social_platform"),
+        "email_opt_out": user.get("email_opt_out", []),
+        "is_guest": user.get("is_guest", False),
+        "auth_provider": user.get("auth_provider", "email"),
     }
 
 def rec_to_dict(rec: dict) -> dict:
@@ -256,6 +263,7 @@ class ProfileUpdate(BaseModel):
     is_public: Optional[bool] = None
     social_handle: Optional[str] = None
     social_platform: Optional[str] = None
+    email_opt_out: Optional[List[str]] = None
 
 class BlockBody(BaseModel):
     user_id: str
@@ -290,6 +298,17 @@ class RecExchangeLinkCreate(BaseModel):
 class KnownBlendInviteAccept(BaseModel):
     token: str
 
+class GoogleCallbackBody(BaseModel):
+    session_id: str
+    referral_source: Optional[str] = None
+
+class GuestConvertBody(BaseModel):
+    guest_id: str
+    email: str
+    password: str
+    display_name: Optional[str] = None
+    city: Optional[str] = None
+
 # ── AUTH ROUTES ──
 @api.post("/auth/register")
 async def register(body: RegisterBody, response: Response):
@@ -311,6 +330,7 @@ async def register(body: RegisterBody, response: Response):
         "known_blend_invites_sent": 0,
         "social_handle": "", "social_platform": None,
         "invited_by": None, "referral_source": body.referral_source or "",
+        "email_opt_out": [], "auth_provider": "email",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.users.insert_one(user_doc)
@@ -398,10 +418,118 @@ async def update_profile(body: ProfileUpdate, user: dict = Depends(get_current_u
         if body.social_platform and body.social_platform not in ("instagram", "snapchat", "x"):
             raise HTTPException(400, "Platform must be instagram, snapchat, or x")
         updates["social_platform"] = body.social_platform
+    if body.email_opt_out is not None:
+        valid_triggers = list(EMAIL_TRIGGERS.keys()) + ["all"]
+        updates["email_opt_out"] = [t for t in body.email_opt_out if t in valid_triggers]
     if updates:
         await db.users.update_one({"_id": uid}, {"$set": updates})
     updated = await db.users.find_one({"_id": uid})
     return user_to_public(updated)
+
+# ── GOOGLE OAUTH ──
+# REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+@api.post("/auth/google-callback")
+async def google_callback(body: GoogleCallbackBody, response: Response):
+    """Exchange Emergent OAuth session_id for app JWT tokens."""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                headers={"X-Session-ID": body.session_id},
+                timeout=10.0,
+            )
+        if resp.status_code != 200:
+            raise HTTPException(400, "Invalid or expired session")
+        google_data = resp.json()
+    except httpx.HTTPError:
+        raise HTTPException(502, "Failed to verify Google session")
+
+    email = google_data.get("email", "").strip().lower()
+    name = google_data.get("name", "")
+    if not email:
+        raise HTTPException(400, "No email returned from Google")
+
+    user = await db.users.find_one({"email": email})
+    if user:
+        uid = str(user["_id"])
+        if not user.get("display_name") and name:
+            await db.users.update_one({"_id": user["_id"]}, {"$set": {"display_name": name}})
+    else:
+        user_doc = {
+            "email": email, "password_hash": "",
+            "display_name": name, "city": "",
+            "is_pro": False, "is_admin": False, "is_banned": False,
+            "public_handle": "", "is_public": False,
+            "default_rec_read": None, "default_rec_read_set_at": None,
+            "default_rec_listen": None, "default_rec_listen_set_at": None,
+            "default_rec_watch": None, "default_rec_watch_set_at": None,
+            "match_count": 0, "match_count_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "known_blend_invites_sent": 0,
+            "social_handle": "", "social_platform": None,
+            "invited_by": None, "referral_source": body.referral_source or "google",
+            "email_opt_out": [],
+            "auth_provider": "google",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        result = await db.users.insert_one(user_doc)
+        uid = str(result.inserted_id)
+
+    access = create_access_token(uid, email)
+    refresh = create_refresh_token(uid)
+    set_auth_cookies(response, access, refresh)
+    user = await db.users.find_one({"_id": ObjectId(uid)})
+    return {**user_to_public(user), "access_token": access}
+
+# ── ANONYMOUS GUEST SESSION ──
+@api.post("/auth/guest")
+async def create_guest_session():
+    """Create an anonymous guest with localStorage UUID. 1 match allowed."""
+    guest_id = f"guest_{uuid.uuid4().hex[:12]}"
+    guest_doc = {
+        "email": f"{guest_id}@guest.local", "password_hash": "",
+        "display_name": "Guest", "city": "",
+        "is_pro": False, "is_admin": False, "is_banned": False, "is_guest": True,
+        "public_handle": "", "is_public": False,
+        "default_rec_read": None, "default_rec_read_set_at": None,
+        "default_rec_listen": None, "default_rec_listen_set_at": None,
+        "default_rec_watch": None, "default_rec_watch_set_at": None,
+        "match_count": 0, "match_count_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "known_blend_invites_sent": 0,
+        "social_handle": "", "social_platform": None,
+        "invited_by": None, "referral_source": "guest",
+        "email_opt_out": [],
+        "guest_id": guest_id,
+        "guest_match_limit": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.users.insert_one(guest_doc)
+    uid = str(result.inserted_id)
+    access = create_access_token(uid, guest_doc["email"])
+    return {"guest_id": guest_id, "access_token": access, "user": {**user_to_public({**guest_doc, "_id": result.inserted_id})}}
+
+@api.post("/auth/convert-guest")
+async def convert_guest(body: GuestConvertBody, response: Response):
+    """Atomically convert guest to registered user, migrating all data."""
+    guest = await db.users.find_one({"guest_id": body.guest_id, "is_guest": True})
+    if not guest:
+        raise HTTPException(404, "Guest session not found")
+    email = body.email.strip().lower()
+    if len(body.password) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters")
+    existing = await db.users.find_one({"email": email, "is_guest": {"$ne": True}})
+    if existing:
+        raise HTTPException(400, "Email already registered")
+    guest_uid = str(guest["_id"])
+    await db.users.update_one({"_id": guest["_id"]}, {"$set": {
+        "email": email, "password_hash": hash_password(body.password),
+        "display_name": body.display_name or "", "city": body.city or "",
+        "is_guest": False, "guest_id": None, "referral_source": "guest_converted",
+    }})
+    access = create_access_token(guest_uid, email)
+    refresh = create_refresh_token(guest_uid)
+    set_auth_cookies(response, access, refresh)
+    updated = await db.users.find_one({"_id": guest["_id"]})
+    return {**user_to_public(updated), "access_token": access}
 
 # ── RECOMMENDATIONS ──
 @api.post("/recommendations")
@@ -1345,6 +1473,62 @@ async def get_public_taste_page(handle: str):
         "entries": items,
     }
 
+# ── OG LINK PREVIEW PROXY ──
+@api.get("/og-proxy")
+async def og_proxy(url: str):
+    """Fetch Open Graph metadata for a URL, with platform-specific overrides."""
+    if not url or not url.startswith("http"):
+        raise HTTPException(400, "Invalid URL")
+    og_data = {"title": "", "description": "", "image": "", "site_name": "", "url": url}
+    # Platform-specific overrides
+    lower_url = url.lower()
+    if "spotify.com" in lower_url:
+        og_data["site_name"] = "Spotify"
+        if "/track/" in lower_url:
+            og_data["description"] = "Song on Spotify"
+        elif "/album/" in lower_url:
+            og_data["description"] = "Album on Spotify"
+        elif "/playlist/" in lower_url:
+            og_data["description"] = "Playlist on Spotify"
+    elif "youtube.com" in lower_url or "youtu.be" in lower_url:
+        og_data["site_name"] = "YouTube"
+        og_data["description"] = "Video on YouTube"
+    elif "music.apple.com" in lower_url:
+        og_data["site_name"] = "Apple Music"
+        og_data["description"] = "Listen on Apple Music"
+    elif "soundcloud.com" in lower_url:
+        og_data["site_name"] = "SoundCloud"
+        og_data["description"] = "Track on SoundCloud"
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; RecommendME/1.0; +https://recommendme.app)"})
+            html = resp.text[:50000]
+        import re as _re
+        def extract_og(prop):
+            m = _re.search(rf'<meta[^>]+property=["\']og:{prop}["\'][^>]+content=["\']([^"\']+)["\']', html, _re.IGNORECASE)
+            if not m:
+                m = _re.search(rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:{prop}["\']', html, _re.IGNORECASE)
+            return m.group(1) if m else ""
+        title = extract_og("title")
+        description = extract_og("description")
+        image = extract_og("image")
+        site_name = extract_og("site_name")
+        if title:
+            og_data["title"] = title
+        if description:
+            og_data["description"] = description
+        if image:
+            og_data["image"] = image
+        if site_name:
+            og_data["site_name"] = site_name
+        if not og_data["title"]:
+            m = _re.search(r'<title[^>]*>([^<]+)</title>', html, _re.IGNORECASE)
+            if m:
+                og_data["title"] = m.group(1).strip()
+    except Exception as e:
+        logger.warning(f"OG proxy fetch failed for {url}: {e}")
+    return og_data
+
 # ── ACTIVE MATCHES ──
 @api.get("/matches/active")
 async def get_active_matches(user: dict = Depends(get_current_user)):
@@ -1547,8 +1731,145 @@ async def send_email_async(to: str, subject: str, html: str):
     except Exception as e:
         logger.warning(f"Email failed: {e}")
 
+async def send_triggered_email(user_id: str, trigger: str, subject: str, html: str):
+    """Send email if user hasn't opted out of this trigger type."""
+    try:
+        user = await db.users.find_one({"_id": ObjectId(user_id)}, {"email": 1, "email_opt_out": 1, "is_guest": 1})
+        if not user or user.get("is_guest"):
+            return
+        opt_out = user.get("email_opt_out", [])
+        if trigger in opt_out or "all" in opt_out:
+            logger.info(f"Email opted out: {user.get('email')} / {trigger}")
+            return
+        await send_email_async(user["email"], subject, html)
+    except Exception as e:
+        logger.warning(f"Triggered email failed ({trigger}): {e}")
+
+# Email trigger constants
+EMAIL_TRIGGERS = {
+    "welcome": "Welcome to RecommendME",
+    "match_found": "You have a new match!",
+    "match_revealed": "Your match has been revealed",
+    "new_follower": "Someone followed you",
+    "connection_formed": "New connection formed!",
+    "broadcast_response": "Someone responded to your broadcast",
+    "exchange_link_activity": "New submission on your exchange link",
+    "blend_score_ready": "Your blend score is ready",
+    "weekly_digest": "Your weekly RecommendME digest",
+    "inactivity_nudge": "We miss you on RecommendME",
+}
+
+def email_html_wrap(title: str, body: str) -> str:
+    return f"""<div style="font-family:'Nunito',sans-serif;max-width:480px;margin:0 auto;padding:24px;background:#FFFDF7;">
+<h2 style="font-family:'Fredoka',sans-serif;color:#1a1a1a;font-size:22px;margin:0 0 16px;">{title}</h2>
+<div style="color:#333;font-size:15px;line-height:1.6;">{body}</div>
+<hr style="border:none;border-top:2px solid #1a1a1a;margin:24px 0 16px;"/>
+<p style="color:#6b6b6b;font-size:12px;">RecommendME &mdash; a human-filtered taste exchange.</p>
+</div>"""
+
 # ── Include Router ──
 app.include_router(api)
+
+# ── HEALTH ──
+@app.get("/health")
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok", "ts": datetime.now(timezone.utc).isoformat()}
+
+# ── CRON HELPER ──
+def verify_cron_secret(x_cron_secret: str = Header(None)):
+    if not CRON_SECRET or x_cron_secret != CRON_SECRET:
+        raise HTTPException(403, "Invalid cron secret")
+
+cron_router = APIRouter(prefix="/api/internal/cron")
+
+# ── CRON: MATCHING QUEUE (LLM fallback for entries older than 24h) ──
+@cron_router.post("/matching-queue")
+async def cron_matching_queue(_=Depends(verify_cron_secret)):
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    stale = await db.matching_pool.find({"entered_at": {"$lt": cutoff}}).to_list(50)
+    processed = 0
+    errors = 0
+    for entry in stale:
+        try:
+            if groq_client:
+                await generate_llm_fallback(entry["user_id"], entry["category"], entry.get("request_note", ""))
+                processed += 1
+            else:
+                await db.matching_pool.delete_one({"_id": entry["_id"]})
+                processed += 1
+        except Exception as e:
+            logger.warning(f"Cron matching-queue error: {e}")
+            errors += 1
+    await db.cron_logs.insert_one({
+        "job_name": "matching-queue", "records_processed": processed,
+        "errors": errors, "ran_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"processed": processed, "errors": errors}
+
+# ── CRON: FOLLOW EXPIRY (expire 24h follow windows) ──
+@cron_router.post("/follow-expiry")
+async def cron_follow_expiry(_=Depends(verify_cron_secret)):
+    now = datetime.now(timezone.utc).isoformat()
+    expired = await db.matches.find({
+        "status": "active", "expires_at": {"$lt": now, "$ne": None}
+    }).to_list(200)
+    processed = 0
+    for m in expired:
+        await db.matches.update_one({"_id": m["_id"]}, {"$set": {"status": "expired"}})
+        processed += 1
+    await db.cron_logs.insert_one({
+        "job_name": "follow-expiry", "records_processed": processed,
+        "errors": 0, "ran_at": now,
+    })
+    return {"processed": processed, "errors": 0}
+
+# ── CRON: LLM FALLBACK (generate LLM recs for long-waiting users) ──
+@cron_router.post("/llm-fallback")
+async def cron_llm_fallback(_=Depends(verify_cron_secret)):
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+    waiting = await db.matching_pool.find({"entered_at": {"$lt": cutoff}}).to_list(20)
+    processed = 0
+    errors = 0
+    for entry in waiting:
+        try:
+            if groq_client:
+                await generate_llm_fallback(entry["user_id"], entry["category"], entry.get("request_note", ""))
+                processed += 1
+        except Exception as e:
+            logger.warning(f"Cron llm-fallback error: {e}")
+            errors += 1
+    await db.cron_logs.insert_one({
+        "job_name": "llm-fallback", "records_processed": processed,
+        "errors": errors, "ran_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"processed": processed, "errors": errors}
+
+# ── CRON: CLEANUP (expired links, old pool entries, stale data) ──
+@cron_router.post("/cleanup")
+async def cron_cleanup(_=Depends(verify_cron_secret)):
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    processed = 0
+    expired_links = await db.rec_exchange_links.update_many(
+        {"is_active": True, "expires_at": {"$lt": now_iso}}, {"$set": {"is_active": False}})
+    processed += expired_links.modified_count
+    cutoff_48h = (now - timedelta(hours=48)).isoformat()
+    stale_pool = await db.matching_pool.delete_many({"entered_at": {"$lt": cutoff_48h}})
+    processed += stale_pool.deleted_count
+    expired_broadcasts = await db.broadcasts.update_many(
+        {"is_active": True, "expires_at": {"$lt": now_iso}}, {"$set": {"is_active": False}})
+    processed += expired_broadcasts.modified_count
+    cutoff_1h = (now - timedelta(hours=1)).isoformat()
+    old_attempts = await db.login_attempts.delete_many({"locked_until": {"$lt": cutoff_1h}})
+    processed += old_attempts.deleted_count
+    await db.cron_logs.insert_one({
+        "job_name": "cleanup", "records_processed": processed,
+        "errors": 0, "ran_at": now_iso,
+    })
+    return {"processed": processed, "errors": 0}
+
+app.include_router(cron_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1590,6 +1911,7 @@ async def startup():
             "match_count": 0, "match_count_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "known_blend_invites_sent": 0, "social_handle": "", "social_platform": None,
             "invited_by": None, "referral_source": "",
+            "email_opt_out": [], "auth_provider": "email",
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
         logger.info(f"Admin seeded: {admin_email}")
