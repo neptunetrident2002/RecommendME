@@ -1,43 +1,132 @@
-/* RecommendME Custom Styles */
+/* RecommendME V6 — Bold Flat Design */
 
-/* Animations */
+/* ── Animations ── */
 @keyframes pulse-slow {
   0%, 100% { transform: scale(1); opacity: 0.6; }
-  50% { transform: scale(1.15); opacity: 0.3; }
-}
-@keyframes pulse-slower {
-  0%, 100% { transform: scale(1); opacity: 0.5; }
-  50% { transform: scale(1.1); opacity: 0.2; }
+  50% { transform: scale(1.12); opacity: 0.3; }
 }
 @keyframes float {
   0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-8px); }
-}
-@keyframes bounce-subtle {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
+  50% { transform: translateY(-6px); }
 }
 @keyframes fade-in {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes count-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
 }
 
 .animate-pulse-slow { animation: pulse-slow 3s ease-in-out infinite; }
-.animate-pulse-slower { animation: pulse-slower 4s ease-in-out infinite; }
 .animate-float { animation: float 3s ease-in-out infinite; }
-.animate-bounce-subtle { animation: bounce-subtle 2s ease-in-out infinite; }
-.animate-fade-in { animation: fade-in 0.5s ease-out; }
+.animate-fade-in { animation: fade-in 0.4s ease-out; }
+.animate-slide-up { animation: slide-up 0.5s ease-out; }
+.animate-count-pulse { animation: count-pulse 2s ease-in-out infinite; }
+
+/* ── Bold flat card base ── */
+.bold-card {
+  background: #FFFFFF;
+  border: 2px solid #1a1a1a;
+  box-shadow: 4px 4px 0 #1a1a1a;
+  border-radius: 16px;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.bold-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 5px 5px 0 #1a1a1a;
+}
+
+/* ── Bold flat button ── */
+.bold-btn {
+  border: 2px solid #1a1a1a;
+  box-shadow: 4px 4px 0 #1a1a1a;
+  border-radius: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  text-transform: none;
+}
+.bold-btn:active {
+  transform: translate(4px, 4px);
+  box-shadow: none;
+}
+.bold-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bold-btn-primary {
+  background: #1CB0F6;
+  color: #FFFFFF;
+}
+.bold-btn-orange {
+  background: #FF9600;
+  color: #FFFFFF;
+}
+.bold-btn-red {
+  background: #FF4B4B;
+  color: #FFFFFF;
+}
+.bold-btn-yellow {
+  background: #FFC800;
+  color: #1a1a1a;
+}
+.bold-btn-green {
+  background: #58CC02;
+  color: #FFFFFF;
+}
+.bold-btn-ghost {
+  background: #FFFFFF;
+  color: #1a1a1a;
+}
+
+/* ── Bold flat input ── */
+.bold-input {
+  background: #FFFFFF;
+  border: 2px solid #1a1a1a;
+  border-radius: 12px;
+  padding: 0.75rem 1rem;
+  font-size: 1rem;
+  font-weight: 500;
+  outline: none;
+  transition: box-shadow 0.15s ease;
+  width: 100%;
+}
+.bold-input:focus {
+  box-shadow: 4px 4px 0 #1CB0F6;
+}
+
+/* ── Bold badge ── */
+.bold-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 2px solid #1a1a1a;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+/* ── Initials circle ── */
+.initials-circle {
+  width: 44px;
+  height: 44px;
+  border: 2px solid #1a1a1a;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Fredoka', sans-serif;
+  font-weight: 600;
+  font-size: 1rem;
+}
 
 /* Line clamp */
-.line-clamp-2 {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.line-clamp-3 {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
+.line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.line-clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }

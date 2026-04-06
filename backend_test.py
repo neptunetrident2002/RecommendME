@@ -60,7 +60,7 @@ class RecommendMEAPITester:
         
         if success and response.json().get("is_admin"):
             self.admin_token = response.json().get("access_token")
-            self.session.headers.update({"Authorization": f"Bearer {self.admin_token}"})
+            # Don't update session headers here, we'll use specific headers for admin calls
             self.log_test("Admin Login", True)
             return True
         else:
@@ -132,34 +132,41 @@ class RecommendMEAPITester:
             self.log_test("Get My Recommendations", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
             return False
 
-    def test_set_default_recommendation(self):
-        """Test setting default recommendation"""
+    def test_set_weekly_default(self):
+        """Test setting weekly default recommendation"""
         if not self.test_rec_id:
-            self.log_test("Set Default Recommendation", False, "No recommendation ID available")
+            self.log_test("Set Weekly Default", False, "No recommendation ID available")
             return False
             
         headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("POST", "/recommendations/set-default", {
-            "recommendation_id": self.test_rec_id
+        success, response = self.make_request("POST", "/recommendations/set-weekly-default", {
+            "recommendation_id": self.test_rec_id,
+            "category": "read"
         }, headers=headers)
         
         if success:
-            self.log_test("Set Default Recommendation", True)
+            self.log_test("Set Weekly Default", True)
             return True
         else:
-            self.log_test("Set Default Recommendation", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+            self.log_test("Set Weekly Default", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
             return False
 
-    def test_get_default_recommendation(self):
-        """Test getting default recommendation"""
+    def test_get_weekly_defaults(self):
+        """Test getting weekly defaults"""
         headers = {"Authorization": f"Bearer {self.user_token}"} if self.user_token else {}
-        success, response = self.make_request("GET", "/recommendations/default", headers=headers)
+        success, response = self.make_request("GET", "/recommendations/weekly-defaults", headers=headers)
         
         if success:
-            self.log_test("Get Default Recommendation", True)
-            return True
+            data = response.json()
+            # Check if it has the expected structure with read/listen/watch categories
+            if isinstance(data, dict) and "read" in data and "listen" in data and "watch" in data:
+                self.log_test("Get Weekly Defaults", True)
+                return True
+            else:
+                self.log_test("Get Weekly Defaults", False, "Invalid response structure")
+                return False
         else:
-            self.log_test("Get Default Recommendation", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+            self.log_test("Get Weekly Defaults", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
             return False
 
     def test_matching_pool_operations(self):
@@ -178,12 +185,12 @@ class RecommendMEAPITester:
             self.log_test("Enter Matching Pool", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
             return False
 
-        # Check pool count
-        success, response = self.make_request("GET", "/matching/pool-count/read")
-        if success:
-            self.log_test("Pool Count", True)
-        else:
-            self.log_test("Pool Count", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+        # Check pool count - this endpoint doesn't exist, skip it
+        # success, response = self.make_request("GET", "/matching/pool-count/read")
+        # if success:
+        #     self.log_test("Pool Count", True)
+        # else:
+        #     self.log_test("Pool Count", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
 
         # Check match status
         success, response = self.make_request("GET", "/matching/check", headers=headers)
@@ -267,29 +274,40 @@ class RecommendMEAPITester:
         if not self.admin_token:
             self.log_test("Admin Endpoints", False, "No admin token available")
             return False
-            
-        headers = {"Authorization": f"Bearer {self.admin_token}"}
+        
+        # Create a fresh session for admin requests to avoid token conflicts
+        admin_session = requests.Session()
+        headers = {"Authorization": f"Bearer {self.admin_token}", "Content-Type": "application/json"}
         
         # Admin metrics
-        success, response = self.make_request("GET", "/admin/metrics", headers=headers)
-        if success:
-            self.log_test("Admin Metrics", True)
-        else:
-            self.log_test("Admin Metrics", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+        try:
+            response = admin_session.get(f"{self.base_url}/admin/metrics", headers=headers)
+            if response.status_code == 200:
+                self.log_test("Admin Metrics", True)
+            else:
+                self.log_test("Admin Metrics", False, f"Status: {response.status_code}, Response: {response.text}")
+        except Exception as e:
+            self.log_test("Admin Metrics", False, f"Exception: {str(e)}")
 
         # Admin users
-        success, response = self.make_request("GET", "/admin/users", headers=headers)
-        if success:
-            self.log_test("Admin Users", True)
-        else:
-            self.log_test("Admin Users", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+        try:
+            response = admin_session.get(f"{self.base_url}/admin/users", headers=headers)
+            if response.status_code == 200:
+                self.log_test("Admin Users", True)
+            else:
+                self.log_test("Admin Users", False, f"Status: {response.status_code}, Response: {response.text}")
+        except Exception as e:
+            self.log_test("Admin Users", False, f"Exception: {str(e)}")
 
         # Admin reports
-        success, response = self.make_request("GET", "/admin/reports", headers=headers)
-        if success:
-            self.log_test("Admin Reports", True)
-        else:
-            self.log_test("Admin Reports", False, f"Status: {response.status_code if hasattr(response, 'status_code') else 'Error'}")
+        try:
+            response = admin_session.get(f"{self.base_url}/admin/reports", headers=headers)
+            if response.status_code == 200:
+                self.log_test("Admin Reports", True)
+            else:
+                self.log_test("Admin Reports", False, f"Status: {response.status_code}, Response: {response.text}")
+        except Exception as e:
+            self.log_test("Admin Reports", False, f"Exception: {str(e)}")
 
     def test_logout(self):
         """Test logout"""
@@ -320,8 +338,8 @@ class RecommendMEAPITester:
         # Recommendation tests
         self.test_create_recommendation()
         self.test_get_my_recommendations()
-        self.test_set_default_recommendation()
-        self.test_get_default_recommendation()
+        self.test_set_weekly_default()
+        self.test_get_weekly_defaults()
         
         # Matching tests
         self.test_matching_pool_operations()

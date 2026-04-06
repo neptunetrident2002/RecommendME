@@ -4,26 +4,78 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, BackgroundTasks
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 import os
+import re
 import logging
 import bcrypt
 import jwt
 import secrets
+import hashlib
+import json
+import asyncio
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timezone, timedelta
 
-# MongoDB connection
+# ── Config ──
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
-
 JWT_ALGORITHM = "HS256"
 
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ── Groq client ──
+groq_client = None
+if GROQ_API_KEY:
+    try:
+        from groq import AsyncGroq
+        groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+        logger.info("Groq client initialized")
+    except Exception as e:
+        logger.warning(f"Could not init Groq: {e}")
+
+# ── Resend client ──
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
+if RESEND_API_KEY:
+    try:
+        import resend
+        resend.api_key = RESEND_API_KEY
+        logger.info("Resend configured")
+    except Exception as e:
+        logger.warning(f"Could not init Resend: {e}")
+
+# ── Genre normalisation ──
+GENRE_SUBSTITUTIONS = {
+    "r&b": "rhythm and blues", "d&b": "drum and bass", "dnb": "drum and bass",
+    "dnb": "drum and bass", "2-step": "two step", "2step": "two step",
+    "ukg": "uk garage", "bm": "black metal", "dm": "death metal",
+    "gn": "graphic novel", "mg": "middle grade", "na": "new adult", "ya": "young adult",
+}
+
+def normalise_genre(raw: str) -> str:
+    if not raw or not raw.strip():
+        return ""
+    val = raw.strip()
+    low = val.lower()
+    if low in GENRE_SUBSTITUTIONS:
+        val = GENRE_SUBSTITUTIONS[low]
+    val = val.lower()
+    val = val.replace("-", " ").replace("&", " ")
+    val = re.sub(r"[^a-z ]", "", val)
+    val = re.sub(r" +", " ", val).strip()
+    return val
+
+# ── Auth helpers ──
 def get_jwt_secret():
     return os.environ["JWT_SECRET"]
 
@@ -76,10 +128,54 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
     response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
     response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
 
-def user_to_dict(user: dict) -> dict:
-    u = {k: v for k, v in user.items() if k not in ("password_hash", "_id")}
-    u["id"] = str(user["_id"]) if isinstance(user.get("_id"), ObjectId) else user.get("_id", str(user.get("id", "")))
-    return u
+def user_to_public(user: dict) -> dict:
+    uid = str(user["_id"]) if isinstance(user.get("_id"), ObjectId) else user.get("_id", "")
+    return {
+        "id": uid,
+        "email": user.get("email", ""),
+        "display_name": user.get("display_name", ""),
+        "city": user.get("city", ""),
+        "is_pro": user.get("is_pro", False),
+        "is_admin": user.get("is_admin", False),
+        "is_banned": user.get("is_banned", False),
+        "is_public": user.get("is_public", False),
+        "public_handle": user.get("public_handle", ""),
+        "default_rec_read": user.get("default_rec_read"),
+        "default_rec_read_set_at": user.get("default_rec_read_set_at"),
+        "default_rec_listen": user.get("default_rec_listen"),
+        "default_rec_listen_set_at": user.get("default_rec_listen_set_at"),
+        "default_rec_watch": user.get("default_rec_watch"),
+        "default_rec_watch_set_at": user.get("default_rec_watch_set_at"),
+        "match_count": user.get("match_count", 0),
+        "match_count_date": user.get("match_count_date"),
+        "known_blend_invites_sent": user.get("known_blend_invites_sent", 0),
+        "social_handle": user.get("social_handle", ""),
+        "social_platform": user.get("social_platform"),
+    }
+
+def rec_to_dict(rec: dict) -> dict:
+    if not rec:
+        return None
+    r = {k: v for k, v in rec.items() if k != "_id"}
+    r["id"] = str(rec["_id"])
+    return r
+
+def check_weekly_default_valid(set_at) -> bool:
+    if not set_at:
+        return False
+    if isinstance(set_at, str):
+        set_at = datetime.fromisoformat(set_at)
+    return (datetime.now(timezone.utc) - set_at) < timedelta(hours=168)
+
+async def check_and_reset_match_cap(user: dict) -> tuple:
+    """Returns (current_count, max_count, can_match)"""
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    uid = user["_id"] if isinstance(user["_id"], ObjectId) else ObjectId(user["_id"])
+    if user.get("match_count_date") != today_str:
+        await db.users.update_one({"_id": uid}, {"$set": {"match_count": 0, "match_count_date": today_str}})
+        user["match_count"] = 0
+    max_m = 10 if user.get("is_pro") else 3
+    return user.get("match_count", 0), max_m, user.get("match_count", 0) < max_m
 
 # ── App Setup ──
 app = FastAPI()
@@ -91,6 +187,7 @@ class RegisterBody(BaseModel):
     password: str
     display_name: Optional[str] = None
     city: Optional[str] = None
+    referral_source: Optional[str] = None
 
 class LoginBody(BaseModel):
     email: str
@@ -99,25 +196,32 @@ class LoginBody(BaseModel):
 class RecommendationCreate(BaseModel):
     title: str
     author: Optional[str] = None
-    category: str  # read / listen / watch
+    category: str
+    genre: Optional[str] = None
     url: Optional[str] = None
     why_note: str
 
-class SetDefaultRec(BaseModel):
+class SetWeeklyDefault(BaseModel):
     recommendation_id: str
+    category: str
 
 class EnterPoolBody(BaseModel):
     category: str
     recommendation_id: Optional[str] = None
+    request_note: Optional[str] = None
 
 class WriteRecForMatch(BaseModel):
     match_id: str
     title: str
     author: Optional[str] = None
+    genre: Optional[str] = None
     url: Optional[str] = None
     why_note: str
 
 class FollowBody(BaseModel):
+    match_id: str
+
+class DownvoteBody(BaseModel):
     match_id: str
 
 class ListEntryUpdate(BaseModel):
@@ -125,8 +229,15 @@ class ListEntryUpdate(BaseModel):
     user_comment: Optional[str] = None
     is_archived: Optional[bool] = None
     completion_date: Optional[str] = None
+    show_note_publicly: Optional[bool] = None
 
 class LinkSubmission(BaseModel):
+    category: str
+    title: str
+    author: Optional[str] = None
+    why_note: str
+
+class RecExchangeSubmission(BaseModel):
     category: str
     title: str
     author: Optional[str] = None
@@ -141,6 +252,43 @@ class ReportCreate(BaseModel):
 class ProfileUpdate(BaseModel):
     display_name: Optional[str] = None
     city: Optional[str] = None
+    public_handle: Optional[str] = None
+    is_public: Optional[bool] = None
+    social_handle: Optional[str] = None
+    social_platform: Optional[str] = None
+
+class BlockBody(BaseModel):
+    user_id: str
+
+class BroadcastCreate(BaseModel):
+    category: str
+    request_text: str
+
+class BroadcastResponseBody(BaseModel):
+    broadcast_id: str
+    title: str
+    author: Optional[str] = None
+    genre: Optional[str] = None
+    url: Optional[str] = None
+    why_note: str
+
+class ConnectionExchangeBody(BaseModel):
+    connection_id: str
+    title: str
+    author: Optional[str] = None
+    genre: Optional[str] = None
+    url: Optional[str] = None
+    why_note: str
+
+class WaitlistBody(BaseModel):
+    email: str
+    referral_source: Optional[str] = None
+
+class RecExchangeLinkCreate(BaseModel):
+    recommendation_id: str
+
+class KnownBlendInviteAccept(BaseModel):
+    token: str
 
 # ── AUTH ROUTES ──
 @api.post("/auth/register")
@@ -152,31 +300,31 @@ async def register(body: RegisterBody, response: Response):
     if existing:
         raise HTTPException(400, "Email already registered")
     user_doc = {
-        "email": email,
-        "password_hash": hash_password(body.password),
-        "display_name": body.display_name or "",
-        "city": body.city or "",
-        "is_pro": False,
-        "is_admin": False,
-        "is_banned": False,
-        "default_rec_id": None,
+        "email": email, "password_hash": hash_password(body.password),
+        "display_name": body.display_name or "", "city": body.city or "",
+        "is_pro": False, "is_admin": False, "is_banned": False,
+        "public_handle": "", "is_public": False,
+        "default_rec_read": None, "default_rec_read_set_at": None,
+        "default_rec_listen": None, "default_rec_listen_set_at": None,
+        "default_rec_watch": None, "default_rec_watch_set_at": None,
+        "match_count": 0, "match_count_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "known_blend_invites_sent": 0,
+        "social_handle": "", "social_platform": None,
+        "invited_by": None, "referral_source": body.referral_source or "",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "matches_used": 0,
-        "max_matches": 3,
     }
     result = await db.users.insert_one(user_doc)
     user_doc["_id"] = result.inserted_id
     access = create_access_token(str(result.inserted_id), email)
     refresh = create_refresh_token(str(result.inserted_id))
     set_auth_cookies(response, access, refresh)
-    return {**user_to_dict(user_doc), "access_token": access}
+    return {**user_to_public(user_doc), "access_token": access}
 
 @api.post("/auth/login")
 async def login(body: LoginBody, request: Request, response: Response):
     email = body.email.strip().lower()
     ip = request.client.host if request.client else "unknown"
     identifier = f"{ip}:{email}"
-    # Brute force check
     attempt = await db.login_attempts.find_one({"identifier": identifier}, {"_id": 0})
     if attempt and attempt.get("count", 0) >= 5:
         locked_until = attempt.get("locked_until")
@@ -186,12 +334,10 @@ async def login(body: LoginBody, request: Request, response: Response):
             await db.login_attempts.delete_one({"identifier": identifier})
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
-        # Increment attempts
         await db.login_attempts.update_one(
             {"identifier": identifier},
             {"$inc": {"count": 1}, "$set": {"locked_until": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()}},
-            upsert=True
-        )
+            upsert=True)
         raise HTTPException(401, "Invalid email or password")
     if user.get("is_banned"):
         raise HTTPException(403, "Account banned")
@@ -200,7 +346,7 @@ async def login(body: LoginBody, request: Request, response: Response):
     access = create_access_token(uid, email)
     refresh = create_refresh_token(uid)
     set_auth_cookies(response, access, refresh)
-    return {**user_to_dict(user), "access_token": access}
+    return {**user_to_public(user), "access_token": access}
 
 @api.post("/auth/logout")
 async def logout(response: Response):
@@ -210,7 +356,7 @@ async def logout(response: Response):
 
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
-    return user_to_dict({"_id": ObjectId(user["_id"]) if not isinstance(user["_id"], ObjectId) else user["_id"], **{k: v for k, v in user.items() if k != "_id"}})
+    return user_to_public({"_id": user["_id"], **{k: v for k, v in user.items() if k != "_id"}})
 
 @api.post("/auth/refresh")
 async def refresh_token(request: Request, response: Response):
@@ -233,136 +379,176 @@ async def refresh_token(request: Request, response: Response):
 @api.put("/auth/profile")
 async def update_profile(body: ProfileUpdate, user: dict = Depends(get_current_user)):
     updates = {}
+    uid = ObjectId(user["_id"])
     if body.display_name is not None:
         updates["display_name"] = body.display_name
     if body.city is not None:
         updates["city"] = body.city
+    if body.public_handle is not None:
+        if body.public_handle:
+            existing = await db.users.find_one({"public_handle": body.public_handle, "_id": {"$ne": uid}})
+            if existing:
+                raise HTTPException(400, "Handle already taken")
+        updates["public_handle"] = body.public_handle
+    if body.is_public is not None:
+        updates["is_public"] = body.is_public
+    if body.social_handle is not None:
+        updates["social_handle"] = body.social_handle
+    if body.social_platform is not None:
+        if body.social_platform and body.social_platform not in ("instagram", "snapchat", "x"):
+            raise HTTPException(400, "Platform must be instagram, snapchat, or x")
+        updates["social_platform"] = body.social_platform
     if updates:
-        await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$set": updates})
-    updated = await db.users.find_one({"_id": ObjectId(user["_id"])})
-    return user_to_dict(updated)
+        await db.users.update_one({"_id": uid}, {"$set": updates})
+    updated = await db.users.find_one({"_id": uid})
+    return user_to_public(updated)
 
 # ── RECOMMENDATIONS ──
 @api.post("/recommendations")
-async def create_recommendation(body: RecommendationCreate, user: dict = Depends(get_current_user)):
+async def create_recommendation(body: RecommendationCreate, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     if body.category not in ("read", "listen", "watch"):
         raise HTTPException(400, "Category must be read, listen, or watch")
     if len(body.why_note) < 20:
         raise HTTPException(400, "Why-note must be at least 20 characters")
+    genre = normalise_genre(body.genre) if body.genre else ""
     doc = {
-        "user_id": user["_id"],
-        "title": body.title,
-        "author": body.author or "",
-        "category": body.category,
-        "url": body.url or "",
-        "why_note": body.why_note,
+        "user_id": user["_id"], "title": body.title, "author": body.author or "",
+        "category": body.category, "genre": genre, "url": body.url or "",
+        "og_cache": None, "why_note": body.why_note,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "is_default": False,
     }
     result = await db.recommendations.insert_one(doc)
-    doc["id"] = str(result.inserted_id)
-    doc.pop("_id", None)
-    return doc
+    rec_id = str(result.inserted_id)
+    # Async genre inference if blank
+    if not genre and groq_client:
+        background_tasks.add_task(infer_genre_async, rec_id, body.title, body.author or "")
+    return {**rec_to_dict({**doc, "_id": result.inserted_id})}
 
 @api.get("/recommendations/mine")
 async def get_my_recommendations(user: dict = Depends(get_current_user)):
-    recs = await db.recommendations.find({"user_id": user["_id"]}).to_list(100)
-    out = []
-    for r in recs:
-        r["id"] = str(r["_id"])
-        r.pop("_id", None)
-        out.append(r)
-    return out
+    recs = await db.recommendations.find({"user_id": user["_id"]}).sort("created_at", -1).to_list(200)
+    return [rec_to_dict(r) for r in recs]
 
-@api.post("/recommendations/set-default")
-async def set_default_recommendation(body: SetDefaultRec, user: dict = Depends(get_current_user)):
-    # Unset all defaults for this user
-    await db.recommendations.update_many({"user_id": user["_id"]}, {"$set": {"is_default": False}})
-    await db.recommendations.update_one({"_id": ObjectId(body.recommendation_id), "user_id": user["_id"]}, {"$set": {"is_default": True}})
-    await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$set": {"default_rec_id": body.recommendation_id}})
+@api.delete("/recommendations/{rec_id}")
+async def delete_recommendation(rec_id: str, user: dict = Depends(get_current_user)):
+    rec = await db.recommendations.find_one({"_id": ObjectId(rec_id), "user_id": user["_id"]})
+    if not rec:
+        raise HTTPException(404, "Recommendation not found")
+    await db.recommendations.delete_one({"_id": ObjectId(rec_id)})
     return {"ok": True}
 
-@api.get("/recommendations/default")
-async def get_default_recommendation(user: dict = Depends(get_current_user)):
-    rec = await db.recommendations.find_one({"user_id": user["_id"], "is_default": True})
+@api.post("/recommendations/set-weekly-default")
+async def set_weekly_default(body: SetWeeklyDefault, user: dict = Depends(get_current_user)):
+    if body.category not in ("read", "listen", "watch"):
+        raise HTTPException(400, "Invalid category")
+    rec = await db.recommendations.find_one({"_id": ObjectId(body.recommendation_id), "user_id": user["_id"]})
     if not rec:
-        return {"recommendation": None}
-    rec["id"] = str(rec["_id"])
-    rec.pop("_id", None)
-    return {"recommendation": rec}
+        raise HTTPException(404, "Recommendation not found")
+    field_rec = f"default_rec_{body.category}"
+    field_set = f"default_rec_{body.category}_set_at"
+    await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$set": {
+        field_rec: body.recommendation_id,
+        field_set: datetime.now(timezone.utc).isoformat(),
+    }})
+    return {"ok": True}
+
+@api.get("/recommendations/weekly-defaults")
+async def get_weekly_defaults(user: dict = Depends(get_current_user)):
+    u = await db.users.find_one({"_id": ObjectId(user["_id"])})
+    result = {}
+    for cat in ("read", "listen", "watch"):
+        rec_id = u.get(f"default_rec_{cat}")
+        set_at = u.get(f"default_rec_{cat}_set_at")
+        valid = check_weekly_default_valid(set_at)
+        rec = None
+        if rec_id and valid:
+            r = await db.recommendations.find_one({"_id": ObjectId(rec_id)})
+            rec = rec_to_dict(r) if r else None
+        hours_left = 0
+        if set_at and valid:
+            if isinstance(set_at, str):
+                set_at = datetime.fromisoformat(set_at)
+            hours_left = max(0, 168 - (datetime.now(timezone.utc) - set_at).total_seconds() / 3600)
+        result[cat] = {"recommendation": rec, "valid": valid, "hours_left": round(hours_left, 1)}
+    return result
 
 # ── MATCHING POOL ──
 @api.post("/matching/enter")
 async def enter_pool(body: EnterPoolBody, user: dict = Depends(get_current_user)):
     if body.category not in ("read", "listen", "watch"):
         raise HTTPException(400, "Invalid category")
-    # Check match limit for free users
-    if not user.get("is_pro") and user.get("matches_used", 0) >= user.get("max_matches", 3):
-        raise HTTPException(403, "Match limit reached. Upgrade to Pro for unlimited matches.")
-    # Check if user has a recommendation ready
-    rec_id = body.recommendation_id or user.get("default_rec_id")
-    if rec_id:
-        rec = await db.recommendations.find_one({"_id": ObjectId(rec_id), "user_id": user["_id"]})
-        if not rec:
-            raise HTTPException(400, "Recommendation not found")
-    # Remove any existing pool entry
+    count, max_m, can_match = await check_and_reset_match_cap(user)
+    if not can_match:
+        raise HTTPException(403, f"Match limit reached ({count}/{max_m} today).")
+    rec_id = body.recommendation_id
+    if not rec_id:
+        u = await db.users.find_one({"_id": ObjectId(user["_id"])})
+        field = f"default_rec_{body.category}"
+        field_set = f"default_rec_{body.category}_set_at"
+        if u.get(field) and check_weekly_default_valid(u.get(field_set)):
+            rec_id = u[field]
     await db.matching_pool.delete_many({"user_id": user["_id"]})
     pool_entry = {
-        "user_id": user["_id"],
-        "category": body.category,
-        "recommendation_id": rec_id,
-        "entered_at": datetime.now(timezone.utc).isoformat(),
-        "status": "waiting",
+        "user_id": user["_id"], "category": body.category,
+        "rec_id": rec_id, "entered_at": datetime.now(timezone.utc).isoformat(),
+        "request_note": body.request_note or "",
     }
     await db.matching_pool.insert_one(pool_entry)
-    return {"status": "waiting", "message": "You're in the pool"}
-
-@api.get("/matching/pool-count/{category}")
-async def pool_count(category: str):
-    count = await db.matching_pool.count_documents({"category": category, "status": "waiting"})
-    return {"category": category, "count": count}
+    return {"status": "waiting"}
 
 @api.get("/matching/check")
 async def check_match(user: dict = Depends(get_current_user)):
-    # Check if user is in pool
-    my_entry = await db.matching_pool.find_one({"user_id": user["_id"], "status": "waiting"})
+    my_entry = await db.matching_pool.find_one({"user_id": user["_id"]})
     if not my_entry:
-        # Check if user was already matched
         match = await db.matches.find_one({
             "$or": [{"user_a_id": user["_id"]}, {"user_b_id": user["_id"]}],
             "status": {"$in": ["pending", "active"]}
         }, sort=[("created_at", -1)])
         if match:
-            match["id"] = str(match["_id"])
-            match.pop("_id", None)
-            return {"status": "matched", "match": match}
+            return {"status": "matched", "match": {**{k: v for k, v in match.items() if k != "_id"}, "id": str(match["_id"])}}
         return {"status": "not_in_pool"}
-    # Try to find another person in the same category
-    other = await db.matching_pool.find_one({
-        "category": my_entry["category"],
-        "status": "waiting",
-        "user_id": {"$ne": user["_id"]}
-    })
+    uid = user["_id"]
+    # Get blocks and exclusions
+    blocks = await db.blocks.find({"$or": [{"blocker_id": uid}, {"blocked_id": uid}]}).to_list(500)
+    blocked_ids = set()
+    for b in blocks:
+        blocked_ids.add(b["blocker_id"])
+        blocked_ids.add(b["blocked_id"])
+    blocked_ids.discard(uid)
+    # Get pending reports
+    pending_reports = await db.reports.find({"reporter_id": uid, "resolved_at": None}).to_list(100)
+    for r in pending_reports:
+        blocked_ids.add(r["reported_user_id"])
+    # Get prior matches, follows, connections
+    prior_matches = await db.matches.find({"$or": [{"user_a_id": uid}, {"user_b_id": uid}]}).to_list(500)
+    for m in prior_matches:
+        blocked_ids.add(m["user_a_id"])
+        blocked_ids.add(m["user_b_id"])
+    blocked_ids.discard(uid)
+    exclude_filter = {"category": my_entry["category"], "user_id": {"$ne": uid, "$nin": list(blocked_ids)}}
+    pool_size = await db.matching_pool.count_documents(exclude_filter)
+    # If pool < 10, relax prior match history
+    if pool_size == 0:
+        block_only = set()
+        for b in blocks:
+            block_only.add(b["blocker_id"])
+            block_only.add(b["blocked_id"])
+        block_only.discard(uid)
+        exclude_filter = {"category": my_entry["category"], "user_id": {"$ne": uid, "$nin": list(block_only)}}
+    other = await db.matching_pool.find_one(exclude_filter, sort=[("entered_at", 1)])
     if other:
-        # Create a match
         now = datetime.now(timezone.utc).isoformat()
         match_doc = {
-            "user_a_id": user["_id"],
-            "user_b_id": other["user_id"],
-            "category": my_entry["category"],
-            "status": "pending",  # pending = need recs locked, active = revealed
-            "created_at": now,
-            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
-            "rec_a_id": my_entry.get("recommendation_id"),
-            "rec_b_id": other.get("recommendation_id"),
-            "revealed_at": None,
+            "user_a_id": uid, "user_b_id": other["user_id"],
+            "category": my_entry["category"], "status": "pending",
+            "created_at": now, "expires_at": None,
+            "rec_a_id": my_entry.get("rec_id"), "rec_b_id": other.get("rec_id"),
+            "revealed_at": None, "is_llm_fallback": False,
         }
         result = await db.matches.insert_one(match_doc)
-        # Remove both from pool
-        await db.matching_pool.delete_many({"user_id": {"$in": [user["_id"], other["user_id"]]}})
-        # Increment matches_used for both
-        await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$inc": {"matches_used": 1}})
-        await db.users.update_one({"_id": ObjectId(other["user_id"])}, {"$inc": {"matches_used": 1}})
+        await db.matching_pool.delete_many({"user_id": {"$in": [uid, other["user_id"]]}})
+        await db.users.update_one({"_id": ObjectId(uid)}, {"$inc": {"match_count": 1}})
+        await db.users.update_one({"_id": ObjectId(other["user_id"])}, {"$inc": {"match_count": 1}})
         match_doc["id"] = str(result.inserted_id)
         match_doc.pop("_id", None)
         return {"status": "matched", "match": match_doc}
@@ -374,7 +560,7 @@ async def cancel_matching(user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 @api.post("/matching/write-rec")
-async def write_rec_for_match(body: WriteRecForMatch, user: dict = Depends(get_current_user)):
+async def write_rec_for_match(body: WriteRecForMatch, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     if len(body.why_note) < 20:
         raise HTTPException(400, "Why-note must be at least 20 characters")
     match = await db.matches.find_one({"_id": ObjectId(body.match_id)})
@@ -382,22 +568,19 @@ async def write_rec_for_match(body: WriteRecForMatch, user: dict = Depends(get_c
         raise HTTPException(404, "Match not found")
     if user["_id"] not in (match["user_a_id"], match["user_b_id"]):
         raise HTTPException(403, "Not your match")
-    # Create the recommendation
+    genre = normalise_genre(body.genre) if body.genre else ""
     doc = {
-        "user_id": user["_id"],
-        "title": body.title,
-        "author": body.author or "",
-        "category": match["category"],
-        "url": body.url or "",
-        "why_note": body.why_note,
+        "user_id": user["_id"], "title": body.title, "author": body.author or "",
+        "category": match["category"], "genre": genre, "url": body.url or "",
+        "og_cache": None, "why_note": body.why_note,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "is_default": False,
     }
     result = await db.recommendations.insert_one(doc)
     rec_id = str(result.inserted_id)
-    # Update match with this rec
     field = "rec_a_id" if user["_id"] == match["user_a_id"] else "rec_b_id"
     await db.matches.update_one({"_id": ObjectId(body.match_id)}, {"$set": {field: rec_id}})
+    if not genre and groq_client:
+        background_tasks.add_task(infer_genre_async, rec_id, body.title, body.author or "")
     return {"ok": True, "recommendation_id": rec_id}
 
 @api.post("/matching/reveal/{match_id}")
@@ -407,55 +590,29 @@ async def reveal_match(match_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(404, "Match not found")
     if user["_id"] not in (match["user_a_id"], match["user_b_id"]):
         raise HTTPException(403, "Not your match")
-    # Both must have recommendations
     if not match.get("rec_a_id") or not match.get("rec_b_id"):
         raise HTTPException(400, "Both users must have recommendations before reveal")
-    # Update match status to active and set revealed_at
     now = datetime.now(timezone.utc).isoformat()
     expires = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
-    await db.matches.update_one(
-        {"_id": ObjectId(match_id)},
-        {"$set": {"status": "active", "revealed_at": now, "expires_at": expires}}
-    )
-    # Get both recommendations
+    await db.matches.update_one({"_id": ObjectId(match_id)}, {"$set": {"status": "active", "revealed_at": now, "expires_at": expires}})
     is_a = user["_id"] == match["user_a_id"]
     other_rec_id = match["rec_b_id"] if is_a else match["rec_a_id"]
     my_rec_id = match["rec_a_id"] if is_a else match["rec_b_id"]
-    other_rec = await db.recommendations.find_one({"_id": ObjectId(other_rec_id)})
+    other_rec = await db.recommendations.find_one({"_id": ObjectId(other_rec_id)}) if other_rec_id else None
     my_rec = await db.recommendations.find_one({"_id": ObjectId(my_rec_id)}) if my_rec_id else None
-    # Get other user's city
     other_user_id = match["user_b_id"] if is_a else match["user_a_id"]
     other_user = await db.users.find_one({"_id": ObjectId(other_user_id)})
-    # Create list entry for the user
     existing_entry = await db.list_entries.find_one({"user_id": user["_id"], "recommendation_id": other_rec_id, "match_id": match_id})
-    if not existing_entry:
-        list_entry = {
-            "user_id": user["_id"],
-            "recommendation_id": other_rec_id,
-            "match_id": match_id,
-            "source_type": "match",
-            "received_at": now,
-            "completion_status": "not_started",
-            "completion_date": None,
-            "user_comment": "",
-            "is_archived": False,
-        }
-        await db.list_entries.insert_one(list_entry)
-    if other_rec:
-        other_rec["id"] = str(other_rec["_id"])
-        other_rec.pop("_id", None)
-    if my_rec:
-        my_rec["id"] = str(my_rec["_id"])
-        my_rec.pop("_id", None)
-    match_data = {k: v for k, v in match.items() if k != "_id"}
-    match_data["id"] = match_id
-    match_data["status"] = "active"
-    match_data["revealed_at"] = now
-    match_data["expires_at"] = expires
+    if not existing_entry and other_rec_id:
+        await db.list_entries.insert_one({
+            "user_id": user["_id"], "recommendation_id": other_rec_id, "match_id": match_id,
+            "source_type": "match", "received_at": now, "completion_status": "not_started",
+            "completion_date": None, "user_comment": "", "is_archived": False, "show_note_publicly": True,
+        })
     return {
-        "match": match_data,
-        "their_recommendation": other_rec,
-        "my_recommendation": my_rec,
+        "match": {**{k: v for k, v in match.items() if k != "_id"}, "id": match_id, "status": "active", "revealed_at": now, "expires_at": expires},
+        "their_recommendation": rec_to_dict(other_rec),
+        "my_recommendation": rec_to_dict(my_rec),
         "their_city": other_user.get("city", "") if other_user else "",
     }
 
@@ -473,32 +630,23 @@ async def get_exchange(match_id: str, user: dict = Depends(get_current_user)):
     my_rec = await db.recommendations.find_one({"_id": ObjectId(my_rec_id)}) if my_rec_id else None
     other_user_id = match["user_b_id"] if is_a else match["user_a_id"]
     other_user = await db.users.find_one({"_id": ObjectId(other_user_id)})
-    # Check follow status
     my_follow = await db.follows.find_one({"follower_id": user["_id"], "match_id": match_id})
     their_follow = await db.follows.find_one({"follower_id": other_user_id, "match_id": match_id})
-    # Check connection
-    connection = await db.connections.find_one({
-        "$or": [
-            {"user_a_id": user["_id"], "user_b_id": other_user_id, "ended_at": None},
-            {"user_a_id": other_user_id, "user_b_id": user["_id"], "ended_at": None}
-        ]
-    })
-    if other_rec:
-        other_rec["id"] = str(other_rec["_id"])
-        other_rec.pop("_id", None)
-    if my_rec:
-        my_rec["id"] = str(my_rec["_id"])
-        my_rec.pop("_id", None)
+    connection = await db.connections.find_one({"$or": [
+        {"user_a_id": user["_id"], "user_b_id": other_user_id, "ended_at": None},
+        {"user_a_id": other_user_id, "user_b_id": user["_id"], "ended_at": None}
+    ]})
     match_data = {k: v for k, v in match.items() if k != "_id"}
     match_data["id"] = match_id
     return {
         "match": match_data,
-        "their_recommendation": other_rec if match.get("status") == "active" else None,
-        "my_recommendation": my_rec,
+        "their_recommendation": rec_to_dict(other_rec) if match.get("status") in ("active", "completed") else None,
+        "my_recommendation": rec_to_dict(my_rec),
         "their_city": other_user.get("city", "") if other_user else "",
         "i_followed": my_follow is not None,
         "they_followed": their_follow is not None,
         "is_connected": connection is not None,
+        "is_llm_fallback": match.get("is_llm_fallback", False),
         "needs_my_rec": (is_a and not match.get("rec_a_id")) or (not is_a and not match.get("rec_b_id")),
     }
 
@@ -508,61 +656,80 @@ async def follow_user(body: FollowBody, user: dict = Depends(get_current_user)):
     match = await db.matches.find_one({"_id": ObjectId(body.match_id)})
     if not match:
         raise HTTPException(404, "Match not found")
-    if match.get("status") != "active":
+    if match.get("status") not in ("active",):
         raise HTTPException(400, "Match is not active")
-    # Check 24h window
     if match.get("expires_at"):
         expires = datetime.fromisoformat(match["expires_at"])
         if datetime.now(timezone.utc) > expires:
             raise HTTPException(400, "Follow window has expired")
-    # Check if already followed
     existing = await db.follows.find_one({"follower_id": user["_id"], "match_id": body.match_id})
     if existing:
         raise HTTPException(400, "Already followed")
     is_a = user["_id"] == match["user_a_id"]
     other_user_id = match["user_b_id"] if is_a else match["user_a_id"]
     await db.follows.insert_one({
-        "follower_id": user["_id"],
-        "followee_id": other_user_id,
-        "match_id": body.match_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "follower_id": user["_id"], "followee_id": other_user_id,
+        "match_id": body.match_id, "created_at": datetime.now(timezone.utc).isoformat(),
     })
-    # Check if mutual follow → create connection
     mutual = await db.follows.find_one({"follower_id": other_user_id, "match_id": body.match_id})
     if mutual:
-        existing_conn = await db.connections.find_one({
-            "$or": [
-                {"user_a_id": user["_id"], "user_b_id": other_user_id, "ended_at": None},
-                {"user_a_id": other_user_id, "user_b_id": user["_id"], "ended_at": None}
-            ]
-        })
+        existing_conn = await db.connections.find_one({"$or": [
+            {"user_a_id": user["_id"], "user_b_id": other_user_id, "ended_at": None},
+            {"user_a_id": other_user_id, "user_b_id": user["_id"], "ended_at": None}
+        ]})
         if not existing_conn:
-            await db.connections.insert_one({
-                "user_a_id": user["_id"],
-                "user_b_id": other_user_id,
-                "formed_at": datetime.now(timezone.utc).isoformat(),
-                "ended_at": None,
-                "match_id": body.match_id,
+            conn_result = await db.connections.insert_one({
+                "user_a_id": user["_id"], "user_b_id": other_user_id,
+                "formed_at": datetime.now(timezone.utc).isoformat(), "ended_at": None,
+                "exchange_count": 0, "social_a_visible": False, "social_b_visible": False,
+            })
+            # Create blend
+            blend_token = secrets.token_urlsafe(12)
+            await db.blends.insert_one({
+                "connection_id": str(conn_result.inserted_id),
+                "user_a_id": user["_id"], "user_b_id": other_user_id,
+                "blend_type": "stranger", "public_token": blend_token,
+                "is_public": False, "score": None, "descriptors": None,
+                "score_summary": None, "score_computed_at": None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
             })
             await db.matches.update_one({"_id": ObjectId(body.match_id)}, {"$set": {"status": "completed"}})
         return {"ok": True, "connection_formed": True}
     return {"ok": True, "connection_formed": False}
 
+@api.post("/downvote")
+async def downvote(body: DownvoteBody, user: dict = Depends(get_current_user)):
+    await db.downvotes.insert_one({
+        "user_id": user["_id"], "match_id": body.match_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"ok": True}
+
 @api.get("/connections")
 async def get_connections(user: dict = Depends(get_current_user)):
     connections = await db.connections.find({
-        "$or": [{"user_a_id": user["_id"]}, {"user_b_id": user["_id"]}],
-        "ended_at": None
+        "$or": [{"user_a_id": user["_id"]}, {"user_b_id": user["_id"]}], "ended_at": None
     }).to_list(100)
     result = []
     for c in connections:
         other_id = c["user_b_id"] if c["user_a_id"] == user["_id"] else c["user_a_id"]
         other = await db.users.find_one({"_id": ObjectId(other_id)})
+        blend = await db.blends.find_one({"connection_id": str(c["_id"])})
+        is_a = c["user_a_id"] == user["_id"]
+        my_social_visible = c.get("social_a_visible" if is_a else "social_b_visible", False)
+        their_social_visible = c.get("social_b_visible" if is_a else "social_a_visible", False)
+        their_social = None
+        if their_social_visible and c.get("exchange_count", 0) >= 7 and other:
+            their_social = {"handle": other.get("social_handle", ""), "platform": other.get("social_platform", "")}
         result.append({
             "id": str(c["_id"]),
             "other_user": {"id": other_id, "display_name": other.get("display_name", ""), "city": other.get("city", "")} if other else None,
             "formed_at": c["formed_at"],
-            "match_id": c.get("match_id", ""),
+            "exchange_count": c.get("exchange_count", 0),
+            "my_social_visible": my_social_visible,
+            "their_social": their_social,
+            "blend_token": blend.get("public_token") if blend else None,
+            "blend_score": blend.get("score") if blend else None,
         })
     return result
 
@@ -576,16 +743,161 @@ async def disconnect(connection_id: str, user: dict = Depends(get_current_user))
     await db.connections.update_one({"_id": ObjectId(connection_id)}, {"$set": {"ended_at": datetime.now(timezone.utc).isoformat()}})
     return {"ok": True}
 
+@api.post("/connections/{connection_id}/toggle-social")
+async def toggle_social(connection_id: str, user: dict = Depends(get_current_user)):
+    conn = await db.connections.find_one({"_id": ObjectId(connection_id)})
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+    if user["_id"] not in (conn["user_a_id"], conn["user_b_id"]):
+        raise HTTPException(403, "Not your connection")
+    if conn.get("exchange_count", 0) < 7:
+        raise HTTPException(400, "Need at least 7 mutual exchanges")
+    is_a = user["_id"] == conn["user_a_id"]
+    field = "social_a_visible" if is_a else "social_b_visible"
+    current = conn.get(field, False)
+    await db.connections.update_one({"_id": ObjectId(connection_id)}, {"$set": {field: not current}})
+    return {"ok": True, "visible": not current}
+
+# ── CONNECTION EXCHANGES ──
+@api.post("/connection-exchange")
+async def send_connection_exchange(body: ConnectionExchangeBody, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    conn = await db.connections.find_one({"_id": ObjectId(body.connection_id), "ended_at": None})
+    if not conn:
+        raise HTTPException(404, "Connection not found or ended")
+    if user["_id"] not in (conn["user_a_id"], conn["user_b_id"]):
+        raise HTTPException(403, "Not your connection")
+    other_id = conn["user_b_id"] if user["_id"] == conn["user_a_id"] else conn["user_a_id"]
+    if len(body.why_note) < 20:
+        raise HTTPException(400, "Why-note must be at least 20 characters")
+    genre = normalise_genre(body.genre) if body.genre else ""
+    rec_doc = {
+        "user_id": user["_id"], "title": body.title, "author": body.author or "",
+        "category": "read", "genre": genre, "url": body.url or "",
+        "og_cache": None, "why_note": body.why_note,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    rec_result = await db.recommendations.insert_one(rec_doc)
+    rec_id = str(rec_result.inserted_id)
+    exchange_doc = {
+        "connection_id": body.connection_id, "sender_id": user["_id"],
+        "receiver_id": other_id, "recommendation_id": rec_id,
+        "sent_at": datetime.now(timezone.utc).isoformat(), "counted": False,
+    }
+    await db.connection_exchanges.insert_one(exchange_doc)
+    # Check for mutual exchange
+    reverse = await db.connection_exchanges.find_one({
+        "connection_id": body.connection_id, "sender_id": other_id,
+        "receiver_id": user["_id"], "counted": False,
+    })
+    if reverse:
+        await db.connection_exchanges.update_many(
+            {"_id": {"$in": [reverse["_id"]]}}, {"$set": {"counted": True}})
+        await db.connection_exchanges.update_one(
+            {"connection_id": body.connection_id, "sender_id": user["_id"], "counted": False},
+            {"$set": {"counted": True}})
+        await db.connections.update_one({"_id": ObjectId(body.connection_id)}, {"$inc": {"exchange_count": 1}})
+    # Create list entry for receiver
+    await db.list_entries.insert_one({
+        "user_id": other_id, "recommendation_id": rec_id, "match_id": None,
+        "source_type": "rec_exchange", "received_at": datetime.now(timezone.utc).isoformat(),
+        "completion_status": "not_started", "completion_date": None,
+        "user_comment": "", "is_archived": False, "show_note_publicly": True,
+    })
+    if not genre and groq_client:
+        background_tasks.add_task(infer_genre_async, rec_id, body.title, body.author or "")
+    return {"ok": True}
+
+# ── BROADCASTS ──
+@api.post("/broadcasts")
+async def create_broadcast(body: BroadcastCreate, user: dict = Depends(get_current_user)):
+    if body.category not in ("read", "listen", "watch"):
+        raise HTTPException(400, "Invalid category")
+    existing = await db.broadcasts.find_one({"user_id": user["_id"], "is_active": True})
+    if existing:
+        raise HTTPException(400, "You already have an active broadcast. Close it first.")
+    doc = {
+        "user_id": user["_id"], "category": body.category,
+        "request_text": body.request_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "is_active": True,
+    }
+    result = await db.broadcasts.insert_one(doc)
+    return {"id": str(result.inserted_id), **{k: v for k, v in doc.items() if k != "_id"}}
+
+@api.get("/broadcasts")
+async def get_broadcasts(user: dict = Depends(get_current_user)):
+    connections = await db.connections.find({
+        "$or": [{"user_a_id": user["_id"]}, {"user_b_id": user["_id"]}], "ended_at": None
+    }).to_list(200)
+    connected_ids = set()
+    for c in connections:
+        connected_ids.add(c["user_a_id"])
+        connected_ids.add(c["user_b_id"])
+    connected_ids.discard(user["_id"])
+    connected_ids.add(user["_id"])
+    broadcasts = await db.broadcasts.find({"user_id": {"$in": list(connected_ids)}, "is_active": True}).sort("created_at", -1).to_list(50)
+    result = []
+    for b in broadcasts:
+        owner = await db.users.find_one({"_id": ObjectId(b["user_id"])})
+        responses = await db.broadcast_responses.count_documents({"broadcast_id": str(b["_id"])})
+        views = await db.broadcast_views.count_documents({"broadcast_id": str(b["_id"])})
+        # Mark as viewed
+        if b["user_id"] != user["_id"]:
+            existing_view = await db.broadcast_views.find_one({"broadcast_id": str(b["_id"]), "viewer_id": user["_id"]})
+            if not existing_view:
+                await db.broadcast_views.insert_one({"broadcast_id": str(b["_id"]), "viewer_id": user["_id"], "viewed_at": datetime.now(timezone.utc).isoformat()})
+        result.append({
+            "id": str(b["_id"]), "category": b["category"], "request_text": b["request_text"],
+            "created_at": b["created_at"], "is_mine": b["user_id"] == user["_id"],
+            "owner_name": owner.get("display_name", "") if owner else "",
+            "response_count": responses, "view_count": views,
+        })
+    return result
+
+@api.post("/broadcasts/respond")
+async def respond_to_broadcast(body: BroadcastResponseBody, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    broadcast = await db.broadcasts.find_one({"_id": ObjectId(body.broadcast_id), "is_active": True})
+    if not broadcast:
+        raise HTTPException(404, "Broadcast not found or closed")
+    if len(body.why_note) < 20:
+        raise HTTPException(400, "Why-note must be at least 20 characters")
+    genre = normalise_genre(body.genre) if body.genre else ""
+    rec_doc = {
+        "user_id": user["_id"], "title": body.title, "author": body.author or "",
+        "category": broadcast["category"], "genre": genre, "url": body.url or "",
+        "og_cache": None, "why_note": body.why_note,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    rec_result = await db.recommendations.insert_one(rec_doc)
+    rec_id = str(rec_result.inserted_id)
+    await db.broadcast_responses.insert_one({
+        "broadcast_id": body.broadcast_id, "responder_id": user["_id"],
+        "recommendation_id": rec_id, "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    await db.list_entries.insert_one({
+        "user_id": broadcast["user_id"], "recommendation_id": rec_id, "match_id": None,
+        "source_type": "broadcast", "received_at": datetime.now(timezone.utc).isoformat(),
+        "completion_status": "not_started", "completion_date": None,
+        "user_comment": "", "is_archived": False, "show_note_publicly": True,
+    })
+    if not genre and groq_client:
+        background_tasks.add_task(infer_genre_async, rec_id, body.title, body.author or "")
+    return {"ok": True}
+
+@api.post("/broadcasts/{broadcast_id}/close")
+async def close_broadcast(broadcast_id: str, user: dict = Depends(get_current_user)):
+    broadcast = await db.broadcasts.find_one({"_id": ObjectId(broadcast_id), "user_id": user["_id"]})
+    if not broadcast:
+        raise HTTPException(404, "Broadcast not found")
+    await db.broadcasts.update_one({"_id": ObjectId(broadcast_id)}, {"$set": {"is_active": False}})
+    return {"ok": True}
+
 # ── THE LIST ──
 @api.get("/list")
-async def get_my_list(
-    user: dict = Depends(get_current_user),
-    category: Optional[str] = None,
-    source_type: Optional[str] = None,
-    completion_status: Optional[str] = None,
-    search: Optional[str] = None,
-    show_archived: bool = False,
-):
+async def get_my_list(user: dict = Depends(get_current_user), category: Optional[str] = None,
+    source_type: Optional[str] = None, completion_status: Optional[str] = None,
+    search: Optional[str] = None, show_archived: bool = False, tab: str = "my_list"):
     query = {"user_id": user["_id"]}
     if not show_archived:
         query["is_archived"] = {"$ne": True}
@@ -593,7 +905,12 @@ async def get_my_list(
         query["source_type"] = source_type
     if completion_status:
         query["completion_status"] = completion_status
-    entries = await db.list_entries.find(query).sort("received_at", -1).to_list(100)
+    # Tab filtering: my_list = own additions, matched_list = from matches/links/llm, blends = from connections
+    if tab == "my_list":
+        query["source_type"] = {"$nin": ["match", "llm", "link", "rec_exchange"]}
+    elif tab == "matched_list":
+        query["source_type"] = {"$in": ["match", "llm", "link", "rec_exchange"]}
+    entries = await db.list_entries.find(query).sort("received_at", -1).to_list(200)
     result = []
     for e in entries:
         rec = await db.recommendations.find_one({"_id": ObjectId(e["recommendation_id"])}) if e.get("recommendation_id") else None
@@ -602,13 +919,9 @@ async def get_my_list(
                 continue
             if search and search.lower() not in rec.get("title", "").lower():
                 continue
-            rec_data = {k: v for k, v in rec.items() if k != "_id"}
-            rec_data["id"] = str(rec["_id"])
-        else:
-            rec_data = None
         entry_data = {k: v for k, v in e.items() if k != "_id"}
         entry_data["id"] = str(e["_id"])
-        entry_data["recommendation"] = rec_data
+        entry_data["recommendation"] = rec_to_dict(rec) if rec else None
         result.append(entry_data)
     return result
 
@@ -626,8 +939,18 @@ async def update_list_entry(entry_id: str, body: ListEntryUpdate, user: dict = D
         updates["is_archived"] = body.is_archived
     if body.completion_date is not None:
         updates["completion_date"] = body.completion_date
+    if body.show_note_publicly is not None:
+        updates["show_note_publicly"] = body.show_note_publicly
     if updates:
         await db.list_entries.update_one({"_id": ObjectId(entry_id)}, {"$set": updates})
+    return {"ok": True}
+
+@api.delete("/list/{entry_id}")
+async def delete_list_entry(entry_id: str, user: dict = Depends(get_current_user)):
+    entry = await db.list_entries.find_one({"_id": ObjectId(entry_id), "user_id": user["_id"]})
+    if not entry:
+        raise HTTPException(404, "Entry not found")
+    await db.list_entries.delete_one({"_id": ObjectId(entry_id)})
     return {"ok": True}
 
 @api.get("/list/stats")
@@ -635,7 +958,6 @@ async def list_stats(user: dict = Depends(get_current_user)):
     total = await db.list_entries.count_documents({"user_id": user["_id"], "is_archived": {"$ne": True}})
     completed = await db.list_entries.count_documents({"user_id": user["_id"], "completion_status": "completed"})
     in_progress = await db.list_entries.count_documents({"user_id": user["_id"], "completion_status": "in_progress"})
-    # Category counts
     entries = await db.list_entries.find({"user_id": user["_id"]}).to_list(1000)
     cat_counts = {"read": 0, "listen": 0, "watch": 0}
     for e in entries:
@@ -645,44 +967,75 @@ async def list_stats(user: dict = Depends(get_current_user)):
                 cat_counts[rec["category"]] += 1
     return {"total": total, "completed": completed, "in_progress": in_progress, "categories": cat_counts}
 
-# ── SHAREABLE LINKS ──
+# ── BLOCKS ──
+@api.post("/blocks")
+async def block_user(body: BlockBody, user: dict = Depends(get_current_user)):
+    if body.user_id == user["_id"]:
+        raise HTTPException(400, "Cannot block yourself")
+    existing = await db.blocks.find_one({"blocker_id": user["_id"], "blocked_id": body.user_id})
+    if existing:
+        raise HTTPException(400, "Already blocked")
+    await db.blocks.insert_one({
+        "blocker_id": user["_id"], "blocked_id": body.user_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    # Sever connections
+    await db.connections.update_many(
+        {"$or": [
+            {"user_a_id": user["_id"], "user_b_id": body.user_id, "ended_at": None},
+            {"user_a_id": body.user_id, "user_b_id": user["_id"], "ended_at": None}
+        ]},
+        {"$set": {"ended_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    # Archive list entries from blocked user
+    recs_by_blocked = await db.recommendations.find({"user_id": body.user_id}).to_list(500)
+    blocked_rec_ids = [str(r["_id"]) for r in recs_by_blocked]
+    if blocked_rec_ids:
+        await db.list_entries.update_many(
+            {"user_id": user["_id"], "recommendation_id": {"$in": blocked_rec_ids}},
+            {"$set": {"is_archived": True}}
+        )
+    return {"ok": True}
+
+@api.get("/blocks")
+async def get_blocks(user: dict = Depends(get_current_user)):
+    blocks = await db.blocks.find({"blocker_id": user["_id"]}).to_list(100)
+    result = []
+    for b in blocks:
+        blocked = await db.users.find_one({"_id": ObjectId(b["blocked_id"])})
+        result.append({
+            "id": str(b["_id"]),
+            "blocked_user": {"id": b["blocked_id"], "display_name": blocked.get("display_name", "") if blocked else ""},
+            "created_at": b["created_at"],
+        })
+    return result
+
+@api.delete("/blocks/{block_id}")
+async def unblock_user(block_id: str, user: dict = Depends(get_current_user)):
+    block = await db.blocks.find_one({"_id": ObjectId(block_id), "blocker_id": user["_id"]})
+    if not block:
+        raise HTTPException(404, "Block not found")
+    await db.blocks.delete_one({"_id": ObjectId(block_id)})
+    return {"ok": True}
+
+# ── SHAREABLE LINKS (Type 1) ──
 @api.post("/shareable-link/generate")
 async def generate_shareable_link(user: dict = Depends(get_current_user)):
     existing = await db.shareable_links.find_one({"user_id": user["_id"]})
     if existing:
-        existing["id"] = str(existing["_id"])
-        existing.pop("_id", None)
-        return existing
+        return {"id": str(existing["_id"]), "token": existing["token"]}
     token = secrets.token_urlsafe(8)
-    doc = {
-        "user_id": user["_id"],
-        "token": token,
-        "default_rec_id": user.get("default_rec_id"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+    doc = {"user_id": user["_id"], "token": token, "created_at": datetime.now(timezone.utc).isoformat()}
     result = await db.shareable_links.insert_one(doc)
-    doc["id"] = str(result.inserted_id)
-    doc.pop("_id", None)
-    return doc
+    return {"id": str(result.inserted_id), "token": token}
 
 @api.get("/shareable-link/{token}")
 async def get_shareable_link(token: str):
     link = await db.shareable_links.find_one({"token": token})
     if not link:
         raise HTTPException(404, "Link not found")
-    # Get owner's default rec
     owner = await db.users.find_one({"_id": ObjectId(link["user_id"])})
-    default_rec = None
-    if owner and owner.get("default_rec_id"):
-        rec = await db.recommendations.find_one({"_id": ObjectId(owner["default_rec_id"])})
-        if rec:
-            default_rec = {k: v for k, v in rec.items() if k != "_id"}
-            default_rec["id"] = str(rec["_id"])
-    return {
-        "token": token,
-        "owner_display_name": owner.get("display_name", "Someone") if owner else "Someone",
-        "has_default_rec": default_rec is not None,
-    }
+    return {"token": token, "owner_display_name": owner.get("display_name", "Someone") if owner else "Someone"}
 
 @api.post("/shareable-link/{token}/submit")
 async def submit_via_link(token: str, body: LinkSubmission, request: Request):
@@ -691,69 +1044,315 @@ async def submit_via_link(token: str, body: LinkSubmission, request: Request):
     link = await db.shareable_links.find_one({"token": token})
     if not link:
         raise HTTPException(404, "Link not found")
-    import hashlib
     ip = request.client.host if request.client else "unknown"
     ip_hash = hashlib.sha256(ip.encode()).hexdigest()
-    # Create recommendation
     rec_doc = {
-        "user_id": "anonymous",
-        "title": body.title,
-        "author": body.author or "",
-        "category": body.category,
-        "url": "",
-        "why_note": body.why_note,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "is_default": False,
+        "user_id": None, "title": body.title, "author": body.author or "",
+        "category": body.category, "genre": "", "url": "", "og_cache": None,
+        "why_note": body.why_note, "created_at": datetime.now(timezone.utc).isoformat(),
     }
     rec_result = await db.recommendations.insert_one(rec_doc)
     rec_id = str(rec_result.inserted_id)
-    # Save submission
     await db.link_submissions.insert_one({
-        "link_id": str(link["_id"]),
-        "category": body.category,
-        "title": body.title,
-        "author": body.author or "",
-        "why_note": body.why_note,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "ip_hash": ip_hash,
-        "recommendation_id": rec_id,
+        "link_id": str(link["_id"]), "rec_exchange_link_id": None,
+        "category": body.category, "title": body.title, "author": body.author or "",
+        "why_note": body.why_note, "created_at": datetime.now(timezone.utc).isoformat(), "ip_hash": ip_hash,
     })
-    # Create list entry for the link owner
     await db.list_entries.insert_one({
-        "user_id": link["user_id"],
-        "recommendation_id": rec_id,
-        "match_id": None,
-        "source_type": "link",
-        "received_at": datetime.now(timezone.utc).isoformat(),
-        "completion_status": "not_started",
-        "completion_date": None,
-        "user_comment": "",
-        "is_archived": False,
+        "user_id": link["user_id"], "recommendation_id": rec_id, "match_id": None,
+        "source_type": "link", "received_at": datetime.now(timezone.utc).isoformat(),
+        "completion_status": "not_started", "completion_date": None,
+        "user_comment": "", "is_archived": False, "show_note_publicly": True,
     })
-    # Return owner's default rec as reward
+    return {"ok": True}
+
+# ── REC EXCHANGE LINKS (Type 2) ──
+@api.post("/rec-exchange-link/create")
+async def create_rec_exchange_link(body: RecExchangeLinkCreate, user: dict = Depends(get_current_user)):
+    existing = await db.rec_exchange_links.find_one({"user_id": user["_id"], "is_active": True})
+    if existing:
+        raise HTTPException(400, "You already have an active rec exchange link")
+    rec = await db.recommendations.find_one({"_id": ObjectId(body.recommendation_id), "user_id": user["_id"]})
+    if not rec:
+        raise HTTPException(404, "Recommendation not found")
+    token = secrets.token_urlsafe(10)
+    doc = {
+        "user_id": user["_id"], "token": token, "rec_id": body.recommendation_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=72)).isoformat(),
+        "is_active": True, "last_notified_count": 0,
+    }
+    result = await db.rec_exchange_links.insert_one(doc)
+    return {"id": str(result.inserted_id), "token": token, "expires_at": doc["expires_at"]}
+
+@api.get("/rec-exchange-link/mine")
+async def get_my_rec_exchange_link(user: dict = Depends(get_current_user)):
+    link = await db.rec_exchange_links.find_one({"user_id": user["_id"], "is_active": True})
+    if not link:
+        return {"link": None}
+    if datetime.fromisoformat(link["expires_at"]) < datetime.now(timezone.utc):
+        await db.rec_exchange_links.update_one({"_id": link["_id"]}, {"$set": {"is_active": False}})
+        return {"link": None}
+    submissions = await db.link_submissions.count_documents({"rec_exchange_link_id": str(link["_id"])})
+    return {"link": {"id": str(link["_id"]), "token": link["token"], "expires_at": link["expires_at"], "submission_count": submissions}}
+
+@api.get("/rec-exchange-link/{token}")
+async def get_rec_exchange_link(token: str):
+    link = await db.rec_exchange_links.find_one({"token": token, "is_active": True})
+    if not link:
+        raise HTTPException(404, "Link not found or expired")
+    if datetime.fromisoformat(link["expires_at"]) < datetime.now(timezone.utc):
+        await db.rec_exchange_links.update_one({"_id": link["_id"]}, {"$set": {"is_active": False}})
+        raise HTTPException(404, "Link expired")
     owner = await db.users.find_one({"_id": ObjectId(link["user_id"])})
+    return {"token": token, "owner_display_name": owner.get("display_name", "Someone") if owner else "Someone"}
+
+@api.post("/rec-exchange-link/{token}/submit")
+async def submit_rec_exchange(token: str, body: RecExchangeSubmission, request: Request):
+    if len(body.why_note) < 20:
+        raise HTTPException(400, "Why-note must be at least 20 characters")
+    link = await db.rec_exchange_links.find_one({"token": token, "is_active": True})
+    if not link:
+        raise HTTPException(404, "Link not found or expired")
+    if datetime.fromisoformat(link["expires_at"]) < datetime.now(timezone.utc):
+        await db.rec_exchange_links.update_one({"_id": link["_id"]}, {"$set": {"is_active": False}})
+        raise HTTPException(404, "Link expired")
+    ip = request.client.host if request.client else "unknown"
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest()
+    rec_doc = {
+        "user_id": None, "title": body.title, "author": body.author or "",
+        "category": body.category, "genre": "", "url": "", "og_cache": None,
+        "why_note": body.why_note, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    rec_result = await db.recommendations.insert_one(rec_doc)
+    rec_id = str(rec_result.inserted_id)
+    await db.link_submissions.insert_one({
+        "link_id": None, "rec_exchange_link_id": str(link["_id"]),
+        "category": body.category, "title": body.title, "author": body.author or "",
+        "why_note": body.why_note, "created_at": datetime.now(timezone.utc).isoformat(), "ip_hash": ip_hash,
+    })
+    await db.list_entries.insert_one({
+        "user_id": link["user_id"], "recommendation_id": rec_id, "match_id": None,
+        "source_type": "rec_exchange", "received_at": datetime.now(timezone.utc).isoformat(),
+        "completion_status": "not_started", "completion_date": None,
+        "user_comment": "", "is_archived": False, "show_note_publicly": True,
+    })
+    # Return the sharer's frozen rec as reward
     reward_rec = None
-    if owner and owner.get("default_rec_id"):
-        rec = await db.recommendations.find_one({"_id": ObjectId(owner["default_rec_id"])})
+    if link.get("rec_id"):
+        rec = await db.recommendations.find_one({"_id": ObjectId(link["rec_id"])})
         if rec:
             reward_rec = {"title": rec["title"], "author": rec.get("author", ""), "category": rec["category"], "why_note": rec["why_note"]}
     return {"ok": True, "reward_recommendation": reward_rec}
 
+# ── KNOWN BLEND INVITES ──
+@api.post("/known-blend/invite")
+async def create_known_blend_invite(user: dict = Depends(get_current_user)):
+    u = await db.users.find_one({"_id": ObjectId(user["_id"])})
+    if u.get("known_blend_invites_sent", 0) >= 2:
+        raise HTTPException(400, "No invite slots remaining (2 of 2 used)")
+    token = secrets.token_urlsafe(12)
+    await db.known_blend_invites.insert_one({
+        "inviter_id": user["_id"], "token": token,
+        "accepted_by": None, "created_at": datetime.now(timezone.utc).isoformat(),
+        "accepted_at": None, "blend_id": None, "status": "pending",
+    })
+    await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$inc": {"known_blend_invites_sent": 1}})
+    return {"token": token}
+
+@api.get("/known-blend/invites")
+async def get_my_invites(user: dict = Depends(get_current_user)):
+    invites = await db.known_blend_invites.find({"inviter_id": user["_id"]}).sort("created_at", -1).to_list(10)
+    result = []
+    for inv in invites:
+        expires_at = (datetime.fromisoformat(inv["created_at"]) + timedelta(hours=72)).isoformat()
+        is_expired = datetime.fromisoformat(expires_at) < datetime.now(timezone.utc)
+        if inv["status"] == "pending" and is_expired:
+            await db.known_blend_invites.update_one({"_id": inv["_id"]}, {"$set": {"status": "expired"}})
+            await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$inc": {"known_blend_invites_sent": -1}})
+            inv["status"] = "expired"
+        accepted_user = None
+        if inv.get("accepted_by"):
+            au = await db.users.find_one({"_id": ObjectId(inv["accepted_by"])})
+            accepted_user = {"display_name": au.get("display_name", "") if au else ""}
+        result.append({
+            "id": str(inv["_id"]), "token": inv["token"], "status": inv["status"],
+            "created_at": inv["created_at"], "expires_at": expires_at,
+            "accepted_user": accepted_user, "blend_id": inv.get("blend_id"),
+        })
+    return result
+
+@api.get("/known-blend/invite/{token}")
+async def get_known_blend_invite(token: str):
+    inv = await db.known_blend_invites.find_one({"token": token})
+    if not inv:
+        raise HTTPException(404, "Invite not found")
+    expires_at = (datetime.fromisoformat(inv["created_at"]) + timedelta(hours=72))
+    if inv["status"] == "pending" and expires_at < datetime.now(timezone.utc):
+        raise HTTPException(404, "Invite expired")
+    if inv["status"] != "pending":
+        raise HTTPException(400, "Invite already used or expired")
+    inviter = await db.users.find_one({"_id": ObjectId(inv["inviter_id"])})
+    return {"token": token, "inviter_name": inviter.get("display_name", "Someone") if inviter else "Someone"}
+
+@api.post("/known-blend/accept")
+async def accept_known_blend_invite(body: KnownBlendInviteAccept, user: dict = Depends(get_current_user)):
+    inv = await db.known_blend_invites.find_one({"token": body.token, "status": "pending"})
+    if not inv:
+        raise HTTPException(404, "Invite not found or already used")
+    expires_at = datetime.fromisoformat(inv["created_at"]) + timedelta(hours=72)
+    if expires_at < datetime.now(timezone.utc):
+        await db.known_blend_invites.update_one({"_id": inv["_id"]}, {"$set": {"status": "expired"}})
+        raise HTTPException(400, "Invite expired")
+    blend_token = secrets.token_urlsafe(12)
+    blend_doc = {
+        "connection_id": None, "user_a_id": inv["inviter_id"], "user_b_id": user["_id"],
+        "blend_type": "known", "public_token": blend_token,
+        "is_public": False, "score": None, "descriptors": None,
+        "score_summary": None, "score_computed_at": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    blend_result = await db.blends.insert_one(blend_doc)
+    await db.known_blend_invites.update_one({"_id": inv["_id"]}, {"$set": {
+        "accepted_by": user["_id"], "accepted_at": datetime.now(timezone.utc).isoformat(),
+        "blend_id": str(blend_result.inserted_id), "status": "accepted",
+    }})
+    await db.users.update_one({"_id": ObjectId(user["_id"])}, {"$set": {"invited_by": inv["inviter_id"]}})
+    return {"ok": True, "blend_token": blend_token}
+
+# ── BLENDS ──
+@api.get("/blends")
+async def get_my_blends(user: dict = Depends(get_current_user)):
+    blends = await db.blends.find({"$or": [{"user_a_id": user["_id"]}, {"user_b_id": user["_id"]}]}).to_list(50)
+    result = []
+    for b in blends:
+        other_id = b["user_b_id"] if b["user_a_id"] == user["_id"] else b["user_a_id"]
+        other = await db.users.find_one({"_id": ObjectId(other_id)})
+        result.append({
+            "id": str(b["_id"]), "blend_type": b.get("blend_type", "stranger"),
+            "public_token": b.get("public_token"), "is_public": b.get("is_public", False),
+            "score": b.get("score"), "descriptors": b.get("descriptors"),
+            "score_summary": b.get("score_summary"), "score_computed_at": b.get("score_computed_at"),
+            "other_user": {"id": other_id, "display_name": other.get("display_name", "") if other else ""},
+        })
+    return result
+
+@api.get("/blends/{token}")
+async def get_blend_by_token(token: str, user: dict = Depends(get_optional_user)):
+    blend = await db.blends.find_one({"public_token": token})
+    if not blend:
+        raise HTTPException(404, "Blend not found")
+    user_a = await db.users.find_one({"_id": ObjectId(blend["user_a_id"])})
+    user_b = await db.users.find_one({"_id": ObjectId(blend["user_b_id"])})
+    entries_a = await db.list_entries.find({"user_id": blend["user_a_id"], "is_archived": {"$ne": True}}).sort("received_at", -1).to_list(50)
+    entries_b = await db.list_entries.find({"user_id": blend["user_b_id"], "is_archived": {"$ne": True}}).sort("received_at", -1).to_list(50)
+    combined = []
+    for e in entries_a + entries_b:
+        rec = await db.recommendations.find_one({"_id": ObjectId(e["recommendation_id"])}) if e.get("recommendation_id") else None
+        if rec:
+            combined.append({
+                "id": str(e["_id"]), "recommendation": rec_to_dict(rec),
+                "user_side": "a" if e["user_id"] == blend["user_a_id"] else "b",
+                "completion_status": e.get("completion_status"),
+            })
+    combined.sort(key=lambda x: x.get("recommendation", {}).get("created_at", ""), reverse=True)
+    return {
+        "blend_type": blend.get("blend_type", "stranger"),
+        "is_public": blend.get("is_public", False),
+        "score": blend.get("score"), "descriptors": blend.get("descriptors"),
+        "score_summary": blend.get("score_summary"), "score_computed_at": blend.get("score_computed_at"),
+        "user_a_name": user_a.get("display_name", "") if user_a else "",
+        "user_b_name": user_b.get("display_name", "") if user_b else "",
+        "entries": combined[:50],
+    }
+
+@api.post("/blends/{blend_id}/toggle-public")
+async def toggle_blend_public(blend_id: str, user: dict = Depends(get_current_user)):
+    blend = await db.blends.find_one({"_id": ObjectId(blend_id)})
+    if not blend:
+        raise HTTPException(404, "Blend not found")
+    if user["_id"] not in (blend["user_a_id"], blend["user_b_id"]):
+        raise HTTPException(403, "Not your blend")
+    new_val = not blend.get("is_public", False)
+    await db.blends.update_one({"_id": ObjectId(blend_id)}, {"$set": {"is_public": new_val}})
+    return {"ok": True, "is_public": new_val}
+
+@api.post("/blends/{blend_id}/recompute")
+async def recompute_blend_score(blend_id: str, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    blend = await db.blends.find_one({"_id": ObjectId(blend_id)})
+    if not blend:
+        raise HTTPException(404, "Blend not found")
+    if user["_id"] not in (blend["user_a_id"], blend["user_b_id"]):
+        raise HTTPException(403, "Not your blend")
+    if blend.get("score_computed_at"):
+        last = datetime.fromisoformat(blend["score_computed_at"])
+        if (datetime.now(timezone.utc) - last) < timedelta(hours=1):
+            raise HTTPException(400, "Already updating. Try again later.")
+    background_tasks.add_task(compute_blend_score, blend_id)
+    return {"ok": True, "message": "Updating..."}
+
 # ── REPORTS ──
 @api.post("/reports")
 async def create_report(body: ReportCreate, user: dict = Depends(get_current_user)):
-    doc = {
-        "reporter_id": user["_id"],
-        "reported_user_id": body.reported_user_id,
-        "match_id": body.match_id,
-        "reason": body.reason,
-        "detail": body.detail or "",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "resolved_at": None,
-        "resolved_by": None,
-    }
-    await db.reports.insert_one(doc)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    count = await db.reports.count_documents({"reporter_id": user["_id"], "created_at": {"$regex": f"^{today}"}})
+    if count >= 3:
+        raise HTTPException(429, "Report limit reached (3 per day)")
+    await db.reports.insert_one({
+        "reporter_id": user["_id"], "reported_user_id": body.reported_user_id,
+        "match_id": body.match_id, "reason": body.reason, "detail": body.detail or "",
+        "created_at": datetime.now(timezone.utc).isoformat(), "resolved_at": None, "resolved_by": None,
+    })
     return {"ok": True}
+
+# ── WAITLIST ──
+@api.post("/waitlist")
+async def join_waitlist(body: WaitlistBody):
+    existing = await db.waitlist.find_one({"email": body.email.strip().lower()})
+    if existing:
+        return {"ok": True, "message": "You're in the list."}
+    await db.waitlist.insert_one({
+        "email": body.email.strip().lower(),
+        "referral_source": body.referral_source or "pro_modal",
+        "created_at": datetime.now(timezone.utc).isoformat(), "invited_at": None,
+    })
+    return {"ok": True, "message": "You're in the list."}
+
+# ── PUBLIC TASTE PAGE ──
+@api.get("/public/user/{handle}")
+async def get_public_taste_page(handle: str):
+    user = await db.users.find_one({"public_handle": handle, "is_public": True})
+    if not user:
+        raise HTTPException(404, "User not found or profile is private")
+    entries = await db.list_entries.find({"user_id": str(user["_id"]), "is_archived": {"$ne": True}}).sort("received_at", -1).to_list(50)
+    items = []
+    for e in entries:
+        rec = await db.recommendations.find_one({"_id": ObjectId(e["recommendation_id"])}) if e.get("recommendation_id") else None
+        if rec:
+            show_note = e.get("show_note_publicly", True)
+            items.append({
+                "recommendation": {
+                    "title": rec["title"], "author": rec.get("author", ""),
+                    "category": rec["category"], "genre": rec.get("genre", ""),
+                    "why_note": rec["why_note"] if show_note else "",
+                },
+                "completion_status": e.get("completion_status"),
+                "source_type": e.get("source_type"),
+            })
+    return {
+        "display_name": user.get("display_name", "Someone"),
+        "city": user.get("city", ""),
+        "entries": items,
+    }
+
+# ── ACTIVE MATCHES ──
+@api.get("/matches/active")
+async def get_active_matches(user: dict = Depends(get_current_user)):
+    matches = await db.matches.find({
+        "$or": [{"user_a_id": user["_id"]}, {"user_b_id": user["_id"]}],
+        "status": {"$in": ["pending", "active"]}
+    }).sort("created_at", -1).to_list(20)
+    return [{**{k: v for k, v in m.items() if k != "_id"}, "id": str(m["_id"])} for m in matches]
 
 # ── ADMIN ──
 @api.get("/admin/metrics")
@@ -764,42 +1363,25 @@ async def admin_metrics(user: dict = Depends(get_current_user)):
     total_matches = await db.matches.count_documents({})
     completed_matches = await db.matches.count_documents({"status": "completed"})
     active_matches = await db.matches.count_documents({"status": "active"})
-    total_follows = await db.follows.count_documents({})
     total_connections = await db.connections.count_documents({"ended_at": None})
-    total_list_entries = await db.list_entries.count_documents({})
-    total_completions = await db.list_entries.count_documents({"completion_status": "completed"})
-    total_reports = await db.reports.count_documents({})
+    total_follows = await db.follows.count_documents({})
+    follow_rate = round(total_connections / total_matches * 100, 1) if total_matches > 0 else 0
+    pro_waitlist = await db.waitlist.count_documents({})
+    banned = await db.users.count_documents({"is_banned": True})
     open_reports = await db.reports.count_documents({"resolved_at": None})
-    total_link_submissions = await db.link_submissions.count_documents({})
-    total_shareable_links = await db.shareable_links.count_documents({})
-    pro_users = await db.users.count_documents({"is_pro": True})
-    banned_users = await db.users.count_documents({"is_banned": True})
-    pool_count = await db.matching_pool.count_documents({"status": "waiting"})
-    follow_rate = 0
-    if total_matches > 0:
-        matches_with_follows = await db.follows.distinct("match_id")
-        follow_rate = round(len(matches_with_follows) / total_matches * 100, 1)
-    mutual_rate = 0
-    if total_matches > 0:
-        mutual_rate = round(total_connections / total_matches * 100, 1) if total_matches > 0 else 0
+    llm_today = await db.matches.count_documents({"is_llm_fallback": True, "created_at": {"$regex": f"^{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"}})
+    total_today = await db.matches.count_documents({"created_at": {"$regex": f"^{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"}})
+    llm_rate = round(llm_today / total_today * 100, 1) if total_today > 0 else 0
+    pool_count = await db.matching_pool.count_documents({})
+    known_blends = await db.blends.count_documents({"blend_type": "known"})
+    known_signups = await db.users.count_documents({"invited_by": {"$ne": None}})
     return {
-        "total_users": total_users,
-        "pro_users": pro_users,
-        "banned_users": banned_users,
-        "total_matches": total_matches,
-        "completed_matches": completed_matches,
-        "active_matches": active_matches,
-        "total_follows": total_follows,
-        "total_connections": total_connections,
-        "total_list_entries": total_list_entries,
-        "total_completions": total_completions,
-        "total_reports": total_reports,
-        "open_reports": open_reports,
-        "total_link_submissions": total_link_submissions,
-        "total_shareable_links": total_shareable_links,
-        "follow_rate": follow_rate,
-        "mutual_follow_rate": mutual_rate,
-        "pool_count": pool_count,
+        "active_today": total_today, "connections_formed": total_connections,
+        "mutual_follow_rate": follow_rate, "llm_fallback_rate_today": llm_rate,
+        "pro_waitlist_count": pro_waitlist, "open_reports": open_reports,
+        "total_users": total_users, "total_matches": total_matches,
+        "banned_users": banned, "pool_count": pool_count,
+        "known_blends": known_blends, "known_signups": known_signups,
     }
 
 @api.get("/admin/reports")
@@ -807,12 +1389,7 @@ async def admin_reports(user: dict = Depends(get_current_user)):
     if not user.get("is_admin"):
         raise HTTPException(403, "Admin only")
     reports = await db.reports.find({}).sort("created_at", -1).to_list(100)
-    result = []
-    for r in reports:
-        r["id"] = str(r["_id"])
-        r.pop("_id", None)
-        result.append(r)
-    return result
+    return [{**{k: v for k, v in r.items() if k != "_id"}, "id": str(r["_id"])} for r in reports]
 
 @api.post("/admin/ban/{user_id}")
 async def ban_user(user_id: str, user: dict = Depends(get_current_user)):
@@ -832,10 +1409,7 @@ async def unban_user(user_id: str, user: dict = Depends(get_current_user)):
 async def resolve_report(report_id: str, user: dict = Depends(get_current_user)):
     if not user.get("is_admin"):
         raise HTTPException(403, "Admin only")
-    await db.reports.update_one(
-        {"_id": ObjectId(report_id)},
-        {"$set": {"resolved_at": datetime.now(timezone.utc).isoformat(), "resolved_by": user["_id"]}}
-    )
+    await db.reports.update_one({"_id": ObjectId(report_id)}, {"$set": {"resolved_at": datetime.now(timezone.utc).isoformat(), "resolved_by": user["_id"]}})
     return {"ok": True}
 
 @api.get("/admin/users")
@@ -843,78 +1417,187 @@ async def admin_users(user: dict = Depends(get_current_user)):
     if not user.get("is_admin"):
         raise HTTPException(403, "Admin only")
     users = await db.users.find({}, {"password_hash": 0}).to_list(1000)
-    result = []
-    for u in users:
-        u["id"] = str(u["_id"])
-        u.pop("_id", None)
-        result.append(u)
-    return result
+    return [{**{k: v for k, v in u.items() if k != "_id"}, "id": str(u["_id"])} for u in users]
 
-# ── ACTIVE MATCHES ──
-@api.get("/matches/active")
-async def get_active_matches(user: dict = Depends(get_current_user)):
-    matches = await db.matches.find({
-        "$or": [{"user_a_id": user["_id"]}, {"user_b_id": user["_id"]}],
-        "status": {"$in": ["pending", "active"]}
-    }).sort("created_at", -1).to_list(20)
-    result = []
-    for m in matches:
-        m["id"] = str(m["_id"])
-        m.pop("_id", None)
-        result.append(m)
-    return result
+# ── GROQ ASYNC FUNCTIONS ──
+async def infer_genre_async(rec_id: str, title: str, author: str):
+    if not groq_client:
+        return
+    try:
+        prompt = f"Given the title \"{title}\""
+        if author:
+            prompt += f" by {author}"
+        prompt += ", infer the most likely genre. Return ONLY a JSON object: {\"genre\": \"lowercase genre name\"}. If unsure, use \"other\"."
+        response = await groq_client.chat.completions.create(
+            model=GROQ_MODEL, messages=[
+                {"role": "system", "content": "You classify content into genres. Return only valid JSON."},
+                {"role": "user", "content": prompt}
+            ], temperature=0.3, max_tokens=50,
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content
+        data = json.loads(content)
+        genre = normalise_genre(data.get("genre", "other"))
+        if genre:
+            await db.recommendations.update_one({"_id": ObjectId(rec_id)}, {"$set": {"genre": genre}})
+    except Exception as e:
+        logger.warning(f"Genre inference failed for {rec_id}: {e}")
+
+async def compute_blend_score(blend_id: str):
+    if not groq_client:
+        return
+    try:
+        blend = await db.blends.find_one({"_id": ObjectId(blend_id)})
+        if not blend:
+            return
+        entries_a = await db.list_entries.find({"user_id": blend["user_a_id"]}).to_list(200)
+        entries_b = await db.list_entries.find({"user_id": blend["user_b_id"]}).to_list(200)
+        if len(entries_a) < 5 or len(entries_b) < 5:
+            return
+        async def get_recs(entries):
+            recs = []
+            for e in entries:
+                if e.get("recommendation_id"):
+                    r = await db.recommendations.find_one({"_id": ObjectId(e["recommendation_id"])})
+                    if r:
+                        recs.append({"title": r["title"], "author": r.get("author", ""), "category": r["category"], "genre": r.get("genre", "")})
+            return recs
+        recs_a = await get_recs(entries_a)
+        recs_b = await get_recs(entries_b)
+        min_count = min(len(recs_a), len(recs_b))
+        import random
+        sample_a = random.sample(recs_a, min(min_count, len(recs_a)))
+        sample_b = random.sample(recs_b, min(min_count, len(recs_b)))
+        system_prompt = """You are a taste analyst. Given two people's genre distributions and lists of books, music, and films, return a JSON object with exactly these fields:
+- score: integer 0-100 representing taste compatibility based on genre distribution overlap, inferred taste, style, mood, and cultural sensibility — not based on shared titles
+- descriptors: array of exactly 3 short strings describing shared taste (e.g. "literary fiction", "ambient electronic", "slow cinema") — lowercase, 1-3 words each
+- summary: one sentence maximum 12 words describing shared taste, written warmly in second person
+
+Return only valid JSON. No preamble. No explanation. No markdown fences."""
+        user_msg = f"Person A's list:\n{json.dumps(sample_a[:20])}\n\nPerson B's list:\n{json.dumps(sample_b[:20])}"
+        response = await groq_client.chat.completions.create(
+            model=GROQ_MODEL, messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg}
+            ], temperature=0.3, max_tokens=200,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
+        await db.blends.update_one({"_id": ObjectId(blend_id)}, {"$set": {
+            "score": data.get("score"), "descriptors": data.get("descriptors"),
+            "score_summary": data.get("summary"), "score_computed_at": datetime.now(timezone.utc).isoformat(),
+        }})
+    except Exception as e:
+        logger.warning(f"Blend score computation failed for {blend_id}: {e}")
+
+async def generate_llm_fallback(user_id: str, category: str, request_note: str = ""):
+    if not groq_client:
+        return
+    try:
+        system_prompt = f"""You are writing a single {category} recommendation as a thoughtful human. Write in first person with genuine emotional reflection. Not a review or description — a personal, specific reason this changed you. Return JSON: {{"title": "...", "author": "...", "why_note": "...", "genre": "..."}}"""
+        user_msg = f"Give one {category} recommendation."
+        if request_note:
+            user_msg += f" The person mentioned: {request_note}"
+        response = await groq_client.chat.completions.create(
+            model=GROQ_MODEL, messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg}
+            ], temperature=0.7, max_tokens=300,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
+        genre = normalise_genre(data.get("genre", ""))
+        rec_doc = {
+            "user_id": None, "title": data.get("title", "Unknown"),
+            "author": data.get("author", ""), "category": category,
+            "genre": genre, "url": "", "og_cache": None,
+            "why_note": data.get("why_note", ""), "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        rec_result = await db.recommendations.insert_one(rec_doc)
+        rec_id = str(rec_result.inserted_id)
+        now = datetime.now(timezone.utc).isoformat()
+        match_doc = {
+            "user_a_id": user_id, "user_b_id": None, "category": category,
+            "status": "active", "created_at": now,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+            "rec_a_id": None, "rec_b_id": rec_id,
+            "revealed_at": now, "is_llm_fallback": True,
+        }
+        match_result = await db.matches.insert_one(match_doc)
+        await db.list_entries.insert_one({
+            "user_id": user_id, "recommendation_id": rec_id,
+            "match_id": str(match_result.inserted_id),
+            "source_type": "llm", "received_at": now,
+            "completion_status": "not_started", "completion_date": None,
+            "user_comment": "", "is_archived": False, "show_note_publicly": True,
+        })
+        await db.matching_pool.delete_many({"user_id": user_id})
+    except Exception as e:
+        logger.warning(f"LLM fallback failed for {user_id}: {e}")
+
+# ── EMAIL HELPERS ──
+async def send_email_async(to: str, subject: str, html: str):
+    if not RESEND_API_KEY:
+        logger.info(f"Email skipped (no API key): to={to}, subject={subject}")
+        return
+    try:
+        params = {"from": SENDER_EMAIL, "to": [to], "subject": subject, "html": html}
+        await asyncio.to_thread(resend.Emails.send, params)
+        logger.info(f"Email sent to {to}: {subject}")
+    except Exception as e:
+        logger.warning(f"Email failed: {e}")
 
 # ── Include Router ──
 app.include_router(api)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
 # ── Startup ──
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
+    await db.users.create_index("public_handle", sparse=True)
     await db.login_attempts.create_index("identifier")
     await db.matching_pool.create_index("category")
-    await db.matching_pool.create_index("user_id")
+    try:
+        await db.matching_pool.drop_index("user_id_1")
+    except Exception:
+        pass
+    await db.matching_pool.create_index("user_id", unique=True)
     await db.shareable_links.create_index("token", unique=True)
+    await db.rec_exchange_links.create_index("token", unique=True)
+    await db.blends.create_index("public_token", unique=True)
+    await db.known_blend_invites.create_index("token", unique=True)
+    await db.blocks.create_index([("blocker_id", 1), ("blocked_id", 1)], unique=True)
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@recommendme.app")
     admin_password = os.environ.get("ADMIN_PASSWORD", "Admin123!")
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
         await db.users.insert_one({
-            "email": admin_email,
-            "password_hash": hash_password(admin_password),
-            "display_name": "Admin",
-            "city": "",
-            "is_pro": True,
-            "is_admin": True,
-            "is_banned": False,
-            "default_rec_id": None,
+            "email": admin_email, "password_hash": hash_password(admin_password),
+            "display_name": "Admin", "city": "", "is_pro": True, "is_admin": True,
+            "is_banned": False, "public_handle": "", "is_public": False,
+            "default_rec_read": None, "default_rec_read_set_at": None,
+            "default_rec_listen": None, "default_rec_listen_set_at": None,
+            "default_rec_watch": None, "default_rec_watch_set_at": None,
+            "match_count": 0, "match_count_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "known_blend_invites_sent": 0, "social_handle": "", "social_platform": None,
+            "invited_by": None, "referral_source": "",
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "matches_used": 0,
-            "max_matches": 999,
         })
-        logger.info(f"Admin user created: {admin_email}")
+        logger.info(f"Admin seeded: {admin_email}")
     elif not verify_password(admin_password, existing["password_hash"]):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
-        logger.info("Admin password updated")
-    # Write test credentials
-    try:
-        Path("/app/memory").mkdir(exist_ok=True)
-        with open("/app/memory/test_credentials.md", "w") as f:
-            f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n\n## Auth Endpoints\n- POST /api/auth/register\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n")
-    except Exception as e:
-        logger.warning(f"Could not write test credentials: {e}")
+    Path("/app/memory").mkdir(exist_ok=True)
+    with open("/app/memory/test_credentials.md", "w") as f:
+        f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n")
 
 @app.on_event("shutdown")
 async def shutdown():
