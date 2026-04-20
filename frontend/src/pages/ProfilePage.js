@@ -29,7 +29,7 @@ export default function ProfilePage() {
   const loadData = async () => {
     try {
       const [slRes, relRes, kiRes, blRes] = await Promise.all([
-        API.get("/shareable-link/generate"),
+        API.post("/shareable-link/generate"),
         API.get("/rec-exchange-link/mine"),
         API.get("/known-blend/invites"),
         API.get("/blocks"),

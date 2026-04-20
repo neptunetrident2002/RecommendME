@@ -102,7 +102,11 @@ export default function MyList() {
         ) : entries.length === 0 ? (
           <div className="bold-card p-10 text-center" data-testid="list-empty">
             <h3 className="font-heading text-lg font-semibold text-[#1a1a1a] mb-2">Nothing here yet</h3>
-            <p className="text-[#6b6b6b] text-sm font-body">Match with someone to receive a recommendation.</p>
+            <p className="text-[#6b6b6b] text-sm font-body">
+              {tab === "my_list" 
+                ? "Add your own recommendations to keep track of what you want to explore." 
+                : "Match with someone to receive a recommendation."}
+            </p>
           </div>
         ) : (
           <div className="space-y-3">
