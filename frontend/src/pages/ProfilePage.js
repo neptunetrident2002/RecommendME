@@ -29,16 +29,18 @@ export default function ProfilePage() {
   const loadData = async () => {
     try {
       const [slRes, relRes, kiRes, blRes] = await Promise.all([
-        API.post("/shareable-link/generate"),
-        API.get("/rec-exchange-link/mine"),
-        API.get("/known-blend/invites"),
-        API.get("/blocks"),
+        API.post("/shareable-link/generate").catch(() => ({ data: null })),
+        API.get("/rec-exchange-link/mine").catch(() => ({ data: { link: null } })),
+        API.get("/known-blend/invites").catch(() => ({ data: [] })),
+        API.get("/blocks").catch(() => ({ data: [] })),
       ]);
       setShareLink(slRes.data);
-      setRecExLink(relRes.data.link);
-      setKnownInvites(kiRes.data);
-      setBlocks(blRes.data);
-    } catch {}
+      setRecExLink(relRes.data?.link || null);
+      setKnownInvites(kiRes.data || []);
+      setBlocks(blRes.data || []);
+    } catch (err) {
+      console.error("Failed to load profile data:", err);
+    }
   };
 
   const handleSave = async () => {

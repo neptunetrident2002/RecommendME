@@ -1032,6 +1032,51 @@ async def close_broadcast(broadcast_id: str, user: dict = Depends(get_current_us
     return {"ok": True}
 
 # ── THE LIST ──
+
+class AddToListBody(BaseModel):
+    title: str
+    author: Optional[str] = ""
+    category: str
+    genre: Optional[str] = ""
+    why_note: Optional[str] = ""
+    url: Optional[str] = ""
+
+@api.post("/list/add")
+async def add_to_my_list(body: AddToListBody, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    """Add your own recommendation to your list (My additions tab)."""
+    if body.category not in ("read", "listen", "watch"):
+        raise HTTPException(400, "Category must be read, listen, or watch")
+    genre = normalise_genre(body.genre) if body.genre else ""
+    rec_doc = {
+        "user_id": user["_id"],
+        "title": body.title,
+        "author": body.author or "",
+        "category": body.category,
+        "genre": genre,
+        "url": body.url or "",
+        "og_cache": None,
+        "why_note": body.why_note or "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    rec_result = await db.recommendations.insert_one(rec_doc)
+    rec_id = str(rec_result.inserted_id)
+    await db.list_entries.insert_one({
+        "user_id": user["_id"],
+        "recommendation_id": rec_id,
+        "match_id": None,
+        "source_type": "self",  # New source type for user's own additions
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "completion_status": "not_started",
+        "completion_date": None,
+        "user_comment": "",
+        "is_archived": False,
+        "show_note_publicly": True,
+    })
+    # Auto-infer genre if not provided
+    if not genre and groq_client:
+        background_tasks.add_task(infer_genre_async, rec_id, body.title, body.author or "")
+    return {"ok": True, "recommendation_id": rec_id}
+
 @api.get("/list")
 async def get_my_list(user: dict = Depends(get_current_user), category: Optional[str] = None,
     source_type: Optional[str] = None, completion_status: Optional[str] = None,
@@ -1043,11 +1088,11 @@ async def get_my_list(user: dict = Depends(get_current_user), category: Optional
         query["source_type"] = source_type
     if completion_status:
         query["completion_status"] = completion_status
-    # Tab filtering: my_list = own additions, matched_list = from matches/links/llm, blends = from connections
+    # Tab filtering: my_list = own additions (self), matched_list = from external sources
     if tab == "my_list":
-        query["source_type"] = {"$nin": ["match", "llm", "link", "rec_exchange"]}
+        query["source_type"] = "self"
     elif tab == "matched_list":
-        query["source_type"] = {"$in": ["match", "llm", "link", "rec_exchange"]}
+        query["source_type"] = {"$in": ["match", "llm", "link", "rec_exchange", "broadcast"]}
     entries = await db.list_entries.find(query).sort("received_at", -1).to_list(200)
     result = []
     for e in entries:
