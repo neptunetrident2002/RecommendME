@@ -2,6 +2,9 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+  "node": "18.x"
+  },
   "dependencies": {
     "ajv": "^8.0.0",
     "@hookform/resolvers": "^5.0.1",
