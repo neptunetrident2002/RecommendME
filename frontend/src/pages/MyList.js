@@ -29,7 +29,7 @@ export default function MyList() {
   const [newWhyNote, setNewWhyNote] = useState("");
   const [adding, setAdding] = useState(false);
 
-  useEffect(() => { loadList(); loadStats(); }, [catFilter, search, tab]);
+  useEffect(() => { loadList(); loadStats(); }, [catFilter, search, tab, showArchived]);
 
   const loadList = async () => {
     try {
@@ -96,9 +96,13 @@ export default function MyList() {
   return (
     <div className="min-h-screen bg-[#FFFDF7] px-6 py-8 pb-safe" data-testid="my-list-page">
       <div className="max-w-2xl mx-auto">
-        <h1 className="font-heading text-3xl sm:text-4xl font-semibold text-[#1a1a1a] tracking-tight mb-2" data-testid="my-list-title">My list</h1>
+        <div className="flex items-center justify-between mb-2">
+          <h1 className="font-heading text-3xl sm:text-4xl font-semibold text-[#1a1a1a] tracking-tight" data-testid="my-list-title">My list</h1>
+          <button onClick={() => setShowArchived(!showArchived)} className={`bold-btn px-3 py-1.5 text-xs ${showArchived ? "bold-btn-primary" : "bold-btn-ghost"}`}>
+            {showArchived ? "Hide archived" : "Show archived"}
+          </button>
+        </div>
         <p className="text-[#6b6b6b] font-body mb-6 text-sm">Everything recommended to you, always yours.</p>
-
         {/* Stats */}
         {stats && (
           <div className="grid grid-cols-4 gap-3 mb-6" data-testid="list-stats">
@@ -186,7 +190,11 @@ export default function MyList() {
                       <div className="flex gap-1">
                         <button onClick={() => { setEditEntry(entry); setEditComment(entry.user_comment || ""); setEditStatus(entry.completion_status || "not_started"); }}
                           className="text-[10px] font-bold text-[#6b6b6b] hover:text-[#1a1a1a]" data-testid={`edit-entry-${entry.id}`}>Edit</button>
-                        <button onClick={() => handleArchive(entry.id)} className="text-[10px] text-[#b0b0b0] hover:text-[#1a1a1a]"><Archive size={12} /></button>
+                        {entry.is_archived ? (
+  <button onClick={async () => { try { await API.put(`/list/${entry.id}`, { is_archived: false }); toast.success("Unarchived"); loadList(); } catch {} }} className="text-[10px] text-[#58CC02] hover:text-[#1a1a1a]">Restore</button>
+) : (
+  <button onClick={() => handleArchive(entry.id)} className="text-[10px] text-[#b0b0b0] hover:text-[#1a1a1a]"><Archive size={12} /></button>
+)}
                       </div>
                     </div>
                   </div>
