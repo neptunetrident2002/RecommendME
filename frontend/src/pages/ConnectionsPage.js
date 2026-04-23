@@ -5,6 +5,83 @@ import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
+function BlendCard({ blend: b }) {
+  const [entries, setEntries] = useState([]);
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const loadEntries = async () => {
+    if (!b.public_token) return;
+    setLoading(true);
+    try {
+      const { data } = await API.get(`/blends/${b.public_token}`);
+      setEntries(data.entries || []);
+    } catch {} finally { setLoading(false); }
+  };
+
+  const toggleExpand = () => {
+    if (!expanded && entries.length === 0) loadEntries();
+    setExpanded(!expanded);
+  };
+
+  const CAT_COLOR = { read: "#FF9600", listen: "#FF4B4B", watch: "#FFC800" };
+
+  return (
+    <div className="bold-card p-4" data-testid={`blend-${b.id}`}>
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="bold-badge bg-[#E8E0FF] text-[#7C3AED] text-[10px]">{b.blend_type} blend</span>
+            <span className="text-xs font-bold text-[#1a1a1a]">{b.other_user?.display_name || "?"}</span>
+          </div>
+          {b.score != null ? (
+            <div>
+              <p className="font-heading text-2xl font-bold text-[#1a1a1a]">{b.score}%</p>
+              {b.descriptors && <p className="text-xs text-[#6b6b6b]">{b.descriptors.join(" · ")}</p>}
+              {b.score_summary && <p className="text-xs text-[#6b6b6b] italic mt-1">"{b.score_summary}"</p>}
+            </div>
+          ) : (
+            <p className="text-xs text-[#b0b0b0]">Score not yet computed</p>
+          )}
+        </div>
+        <div className="flex flex-col gap-2 items-end">
+          <button onClick={async () => { try { await API.post(`/blends/${b.id}/recompute`); toast.success("Recomputing..."); } catch (err) { toast.error(err.response?.data?.detail || "Wait"); } }}
+            className="bold-btn bold-btn-ghost px-3 py-2 text-xs">Refresh</button>
+          <button onClick={toggleExpand} className="bold-btn bold-btn-ghost px-3 py-2 text-xs">
+            {expanded ? "Hide list" : "View list"}
+          </button>
+        </div>
+      </div>
+      {expanded && (
+        <div className="mt-4 border-t-2 border-[#1a1a1a] pt-4 space-y-3">
+          {loading ? (
+            <p className="text-xs text-[#b0b0b0] text-center py-4">Loading...</p>
+          ) : entries.length === 0 ? (
+            <p className="text-xs text-[#b0b0b0] text-center py-4">No entries yet</p>
+          ) : (
+            entries.map((e) => {
+              const rec = e.recommendation;
+              if (!rec) return null;
+              const color = CAT_COLOR[rec.category] || "#1CB0F6";
+              return (
+                <div key={e.id} className="p-3 bg-white border-2 border-[#1a1a1a] rounded-xl">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="bold-badge text-[10px]" style={{ background: color, color: color === "#FFC800" ? "#1a1a1a" : "#fff" }}>{rec.category}</span>
+                    <span className="text-[10px] text-[#b0b0b0]">{e.user_side === "a" ? b.other_user?.display_name || "Them" : "You"}</span>
+                  </div>
+                  <p className="font-heading font-semibold text-[#1a1a1a] text-sm">{rec.title}</p>
+                  {rec.author && <p className="text-xs text-[#6b6b6b]">{rec.author}</p>}
+                  <p className="text-xs text-[#6b6b6b] italic mt-1 line-clamp-2">"{rec.why_note}"</p>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ConnectionsPage() {
   const [connections, setConnections] = useState([]);
   const [broadcasts, setBroadcasts] = useState([]);
@@ -217,27 +294,7 @@ export default function ConnectionsPage() {
           ) : (
             <div className="space-y-3">
               {blends.map((b) => (
-                <div key={b.id} className="bold-card p-4" data-testid={`blend-${b.id}`}>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="bold-badge bg-[#E8E0FF] text-[#7C3AED] text-[10px]">{b.blend_type} blend</span>
-                        <span className="text-xs font-bold text-[#1a1a1a]">{b.other_user?.display_name || "?"}</span>
-                      </div>
-                      {b.score != null ? (
-                        <div>
-                          <p className="font-heading text-2xl font-bold text-[#1a1a1a]">{b.score}%</p>
-                          {b.descriptors && <p className="text-xs text-[#6b6b6b]">{b.descriptors.join(" · ")}</p>}
-                          {b.score_summary && <p className="text-xs text-[#6b6b6b] italic mt-1">"{b.score_summary}"</p>}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-[#b0b0b0]">Score not yet computed</p>
-                      )}
-                    </div>
-                    <button onClick={async () => { try { await API.post(`/blends/${b.id}/recompute`); toast.success("Recomputing..."); } catch (err) { toast.error(err.response?.data?.detail || "Wait"); } }}
-                      className="bold-btn bold-btn-ghost px-3 py-2 text-xs" data-testid={`recompute-blend-${b.id}`}>Refresh</button>
-                  </div>
-                </div>
+                <BlendCard key={b.id} blend={b} />
               ))}
             </div>
           )
