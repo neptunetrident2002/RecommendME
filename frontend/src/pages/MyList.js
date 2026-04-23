@@ -37,6 +37,7 @@ export default function MyList() {
       if (catFilter) params.set("category", catFilter);
       if (search) params.set("search", search);
       params.set("tab", tab);
+      if (showArchived) params.set("show_archived", "true");
       const { data } = await API.get(`/list?${params}`);
       setEntries(data);
     } catch {} finally { setLoading(false); }
