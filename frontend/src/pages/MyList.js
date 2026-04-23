@@ -19,6 +19,7 @@ export default function MyList() {
   const [editEntry, setEditEntry] = useState(null);
   const [editComment, setEditComment] = useState("");
   const [editStatus, setEditStatus] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   
   // Add new item state
   const [showAddDialog, setShowAddDialog] = useState(false);
