@@ -4,6 +4,7 @@ import { Search, Archive, MessageSquare, Check, Clock, ExternalLink, Trash2, Plu
 import { toast } from "sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import ShareCard, { CARD_VARIANTS } from "@/components/ShareCard";
 
 const CAT_COLOR = { read: "#FF9600", listen: "#FF4B4B", watch: "#FFC800" };
 const STATUS_LABEL = { not_started: "Not started", in_progress: "In progress", completed: "Completed" };
@@ -20,6 +21,7 @@ export default function MyList() {
   const [editComment, setEditComment] = useState("");
   const [editStatus, setEditStatus] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [shareEntry, setShareEntry] = useState(null);
   
   // Add new item state
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -190,6 +192,7 @@ export default function MyList() {
                       <div className="flex gap-1">
                         <button onClick={() => { setEditEntry(entry); setEditComment(entry.user_comment || ""); setEditStatus(entry.completion_status || "not_started"); }}
                           className="text-[10px] font-bold text-[#6b6b6b] hover:text-[#1a1a1a]" data-testid={`edit-entry-${entry.id}`}>Edit</button>
+                        <button onClick={() => setShareEntry(rec)} className="text-[10px] font-bold text-[#1CB0F6] hover:text-[#1a1a1a]">Share</button>
                         {entry.is_archived ? (
   <button onClick={async () => { try { await API.put(`/list/${entry.id}`, { is_archived: false }); toast.success("Unarchived"); loadList(); } catch {} }} className="text-[10px] text-[#58CC02] hover:text-[#1a1a1a]">Restore</button>
 ) : (
@@ -228,6 +231,12 @@ export default function MyList() {
           </div>
         </DialogContent>
       </Dialog>
+      <Dialog open={!!shareEntry} onOpenChange={(open) => { if (!open) setShareEntry(null); }}>
+  <DialogContent className="sm:max-w-md bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
+    <DialogHeader><DialogTitle className="font-heading text-xl font-semibold text-[#1a1a1a]">Share this rec</DialogTitle></DialogHeader>
+    {shareEntry && <ShareCard variant={CARD_VARIANTS.single_rec} data={shareEntry} />}
+  </DialogContent>
+  </Dialog>
 
       {/* Add to List Dialog */}
       <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
