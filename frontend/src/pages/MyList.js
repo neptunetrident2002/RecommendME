@@ -1,13 +1,13 @@
 import { useState, useEffect } from "react";
 import API from "@/lib/api";
-import { Search, Archive, MessageSquare, Check, Clock, ExternalLink, Trash2 } from "lucide-react";
+import { Search, Archive, MessageSquare, Check, Clock, ExternalLink, Trash2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 const CAT_COLOR = { read: "#FF9600", listen: "#FF4B4B", watch: "#FFC800" };
 const STATUS_LABEL = { not_started: "Not started", in_progress: "In progress", completed: "Completed" };
-const SOURCE_LABEL = { match: "Stranger match", broadcast: "Broadcast", link: "Shareable link", llm: "Curated by RecommendME", rec_exchange: "Rec exchange" };
+const SOURCE_LABEL = { match: "Stranger match", broadcast: "Broadcast", link: "Shareable link", llm: "Curated by RecommendME", rec_exchange: "Rec exchange", self: "Added by you" };
 
 export default function MyList() {
   const [entries, setEntries] = useState([]);
@@ -19,6 +19,14 @@ export default function MyList() {
   const [editEntry, setEditEntry] = useState(null);
   const [editComment, setEditComment] = useState("");
   const [editStatus, setEditStatus] = useState("");
+  
+  // Add new item state
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [newAuthor, setNewAuthor] = useState("");
+  const [newCategory, setNewCategory] = useState("read");
+  const [newWhyNote, setNewWhyNote] = useState("");
+  const [adding, setAdding] = useState(false);
 
   useEffect(() => { loadList(); loadStats(); }, [catFilter, search, tab]);
 
@@ -55,6 +63,34 @@ export default function MyList() {
     try { await API.delete(`/list/${id}`); toast.success("Removed"); loadList(); loadStats(); } catch {}
   };
 
+  const handleAddToList = async () => {
+    if (!newTitle.trim()) {
+      toast.error("Title is required");
+      return;
+    }
+    setAdding(true);
+    try {
+      await API.post("/list/add", {
+        title: newTitle.trim(),
+        author: newAuthor.trim(),
+        category: newCategory,
+        why_note: newWhyNote.trim(),
+      });
+      toast.success("Added to your list!");
+      setShowAddDialog(false);
+      setNewTitle("");
+      setNewAuthor("");
+      setNewCategory("read");
+      setNewWhyNote("");
+      loadList();
+      loadStats();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Could not add");
+    } finally {
+      setAdding(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#FFFDF7] px-6 py-8 pb-safe" data-testid="my-list-page">
       <div className="max-w-2xl mx-auto">
@@ -79,6 +115,17 @@ export default function MyList() {
           </TabsList>
         </Tabs>
 
+        {/* Add button for My additions tab */}
+        {tab === "my_list" && (
+          <button
+            onClick={() => setShowAddDialog(true)}
+            className="bold-btn bold-btn-primary w-full py-3 mb-6 flex items-center justify-center gap-2"
+            data-testid="add-to-list-btn"
+          >
+            <Plus size={18} /> Add to my list
+          </button>
+        )}
+
         {/* Search + filters */}
         <div className="flex gap-3 mb-6">
           <div className="relative flex-1">
@@ -102,7 +149,11 @@ export default function MyList() {
         ) : entries.length === 0 ? (
           <div className="bold-card p-10 text-center" data-testid="list-empty">
             <h3 className="font-heading text-lg font-semibold text-[#1a1a1a] mb-2">Nothing here yet</h3>
-            <p className="text-[#6b6b6b] text-sm font-body">Match with someone to receive a recommendation.</p>
+            <p className="text-[#6b6b6b] text-sm font-body">
+              {tab === "my_list" 
+                ? "Add your own recommendations to keep track of what you want to explore." 
+                : "Match with someone to receive a recommendation."}
+            </p>
           </div>
         ) : (
           <div className="space-y-3">
@@ -164,6 +215,46 @@ export default function MyList() {
                 className="bold-input resize-none" placeholder="Your thoughts..." data-testid="edit-comment-input" />
             </div>
             <button onClick={handleUpdate} data-testid="edit-save-btn" className="w-full bold-btn bold-btn-primary py-3 text-base">Save</button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add to List Dialog */}
+      <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
+        <DialogContent className="sm:max-w-md bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
+          <DialogHeader><DialogTitle className="font-heading text-xl font-semibold text-[#1a1a1a]">Add to your list</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-[#6b6b6b] mb-2">Category</label>
+              <div className="flex gap-2">
+                {["read", "listen", "watch"].map((c) => (
+                  <button key={c} onClick={() => setNewCategory(c)} data-testid={`add-category-${c}`}
+                    className={`bold-btn px-4 py-2 text-sm capitalize ${newCategory === c ? "bold-btn-primary" : "bold-btn-ghost"}`}
+                    style={newCategory === c ? { background: CAT_COLOR[c], color: c === "watch" ? "#1a1a1a" : "#fff" } : {}}>
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-[#6b6b6b] mb-2">Title *</label>
+              <input value={newTitle} onChange={(e) => setNewTitle(e.target.value)}
+                className="bold-input" placeholder="What do you want to explore?" data-testid="add-title-input" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-[#6b6b6b] mb-2">Author / Creator</label>
+              <input value={newAuthor} onChange={(e) => setNewAuthor(e.target.value)}
+                className="bold-input" placeholder="Who made it?" data-testid="add-author-input" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-[#6b6b6b] mb-2">Why this? (optional)</label>
+              <textarea value={newWhyNote} onChange={(e) => setNewWhyNote(e.target.value)} rows={2}
+                className="bold-input resize-none" placeholder="Why do you want to check this out?" data-testid="add-why-input" />
+            </div>
+            <button onClick={handleAddToList} disabled={adding} data-testid="add-submit-btn"
+              className="w-full bold-btn bold-btn-primary py-3 text-base">
+              {adding ? "Adding..." : "Add to list"}
+            </button>
           </div>
         </DialogContent>
       </Dialog>
