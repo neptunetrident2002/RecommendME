@@ -4,28 +4,11 @@ import { Users, UserX, Send, Loader2, Megaphone, Plus, X, Sparkles, Eye, Message
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+// Add to state declarations at the top of ConnectionsPage:
+const [selectedBlend, setSelectedBlend] = useState(null);
 
-function BlendCard({ blend: b }) {
-  const [entries, setEntries] = useState([]);
-  const [expanded, setExpanded] = useState(false);
-  const [loading, setLoading] = useState(false);
-
-  const loadEntries = async () => {
-    if (!b.public_token) return;
-    setLoading(true);
-    try {
-      const { data } = await API.get(`/blends/${b.public_token}`);
-      setEntries(data.entries || []);
-    } catch {} finally { setLoading(false); }
-  };
-
-  const toggleExpand = () => {
-    if (!expanded && entries.length === 0) loadEntries();
-    setExpanded(!expanded);
-  };
-
+function BlendCard({ blend: b, onSelect }) {
   const CAT_COLOR = { read: "#FF9600", listen: "#FF4B4B", watch: "#FFC800" };
-
   return (
     <div className="bold-card p-4" data-testid={`blend-${b.id}`}>
       <div className="flex items-center justify-between">
@@ -47,35 +30,63 @@ function BlendCard({ blend: b }) {
         <div className="flex flex-col gap-2 items-end">
           <button onClick={async () => { try { await API.post(`/blends/${b.id}/recompute`); toast.success("Recomputing..."); } catch (err) { toast.error(err.response?.data?.detail || "Wait"); } }}
             className="bold-btn bold-btn-ghost px-3 py-2 text-xs">Refresh</button>
-          <button onClick={toggleExpand} className="bold-btn bold-btn-ghost px-3 py-2 text-xs">
-            {expanded ? "Hide list" : "View list"}
-          </button>
+          <button onClick={() => onSelect(b)} className="bold-btn bold-btn-ghost px-3 py-2 text-xs">View list</button>
         </div>
       </div>
-      {expanded && (
-        <div className="mt-4 border-t-2 border-[#1a1a1a] pt-4 space-y-3">
-          {loading ? (
-            <p className="text-xs text-[#b0b0b0] text-center py-4">Loading...</p>
-          ) : entries.length === 0 ? (
-            <p className="text-xs text-[#b0b0b0] text-center py-4">No entries yet</p>
-          ) : (
-            entries.map((e) => {
-              const rec = e.recommendation;
-              if (!rec) return null;
-              const color = CAT_COLOR[rec.category] || "#1CB0F6";
-              return (
-                <div key={e.id} className="p-3 bg-white border-2 border-[#1a1a1a] rounded-xl">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="bold-badge text-[10px]" style={{ background: color, color: color === "#FFC800" ? "#1a1a1a" : "#fff" }}>{rec.category}</span>
-                    <span className="text-[10px] text-[#b0b0b0]">{e.user_side === "a" ? b.other_user?.display_name || "Them" : "You"}</span>
-                  </div>
-                  <p className="font-heading font-semibold text-[#1a1a1a] text-sm">{rec.title}</p>
-                  {rec.author && <p className="text-xs text-[#6b6b6b]">{rec.author}</p>}
-                  <p className="text-xs text-[#6b6b6b] italic mt-1 line-clamp-2">"{rec.why_note}"</p>
+    </div>
+  );
+}
+
+function BlendDetailView({ blend: b, onBack }) {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const CAT_COLOR = { read: "#FF9600", listen: "#FF4B4B", watch: "#FFC800" };
+
+  useEffect(() => {
+    if (!b.public_token) { setLoading(false); return; }
+    API.get(`/blends/${b.public_token}`)
+      .then(({ data }) => setEntries(data.entries || []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [b.public_token]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-6">
+        <button onClick={onBack} className="bold-btn bold-btn-ghost px-3 py-2 text-sm">← Back</button>
+        <h2 className="font-heading text-xl font-semibold text-[#1a1a1a]">
+          You × {b.other_user?.display_name || "?"}
+        </h2>
+      </div>
+      {b.score != null && (
+        <div className="bold-card p-4 mb-4">
+          <p className="font-heading text-3xl font-bold text-[#1a1a1a]">{b.score}%</p>
+          {b.descriptors && <p className="text-xs text-[#6b6b6b] mt-1">{b.descriptors.join(" · ")}</p>}
+          {b.score_summary && <p className="text-xs text-[#6b6b6b] italic mt-1">"{b.score_summary}"</p>}
+        </div>
+      )}
+      {loading ? (
+        <p className="text-xs text-[#b0b0b0] text-center py-8">Loading...</p>
+      ) : entries.length === 0 ? (
+        <p className="text-xs text-[#b0b0b0] text-center py-8">No shared entries yet</p>
+      ) : (
+        <div className="space-y-3">
+          {entries.map((e) => {
+            const rec = e.recommendation;
+            if (!rec) return null;
+            const color = CAT_COLOR[rec.category] || "#1CB0F6";
+            return (
+              <div key={e.id} className="bold-card p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="bold-badge text-[10px]" style={{ background: color, color: color === "#FFC800" ? "#1a1a1a" : "#fff" }}>{rec.category}</span>
+                  <span className="text-[10px] text-[#b0b0b0]">{e.user_side === "a" ? b.other_user?.display_name || "Them" : "You"}</span>
                 </div>
-              );
-            })
-          )}
+                <p className="font-heading font-semibold text-[#1a1a1a] text-sm">{rec.title}</p>
+                {rec.author && <p className="text-xs text-[#6b6b6b]">{rec.author}</p>}
+                <p className="text-xs text-[#6b6b6b] italic mt-1 line-clamp-2">"{rec.why_note}"</p>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -285,21 +296,22 @@ export default function ConnectionsPage() {
         )}
 
         {/* Blends */}
-        {tab === "blends" && (
-          blends.length === 0 ? (
-            <div className="bold-card p-10 text-center">
-              <Sparkles size={40} className="mx-auto text-[#b0b0b0] mb-3" />
-              <p className="text-[#6b6b6b] text-sm">Blends appear when you form connections.</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {blends.map((b) => (
-                <BlendCard key={b.id} blend={b} />
-              ))}
-            </div>
-          )
-        )}
-      </div>
+{tab === "blends" && (
+  selectedBlend ? (
+    <BlendDetailView blend={selectedBlend} onBack={() => setSelectedBlend(null)} />
+  ) : blends.length === 0 ? (
+    <div className="bold-card p-10 text-center">
+      <Sparkles size={40} className="mx-auto text-[#b0b0b0] mb-3" />
+      <p className="text-[#6b6b6b] text-sm">Blends appear when you form connections.</p>
+    </div>
+  ) : (
+    <div className="space-y-3">
+      {blends.map((b) => (
+        <BlendCard key={b.id} blend={b} onSelect={setSelectedBlend} />
+      ))}
+    </div>
+  )
+)}
 
       {/* Send Rec Dialog */}
       <Dialog open={!!showSendRec} onOpenChange={(o) => { if (!o) setShowSendRec(null); }}>
