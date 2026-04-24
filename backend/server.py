@@ -1278,9 +1278,26 @@ async def get_my_rec_exchange_link(user: dict = Depends(get_current_user)):
     if datetime.fromisoformat(link["expires_at"]) < datetime.now(timezone.utc):
         await db.rec_exchange_links.update_one({"_id": link["_id"]}, {"$set": {"is_active": False}})
         return {"link": None}
-    submissions = await db.link_submissions.count_documents({"rec_exchange_link_id": str(link["_id"])})
-    return {"link": {"id": str(link["_id"]), "token": link["token"], "expires_at": link["expires_at"], "submission_count": submissions}}
 
+    submissions = await db.link_submissions.count_documents({"rec_exchange_link_id": str(link["_id"])})
+
+    # Fetch the attached recommendation if present
+    attached_rec = None
+    if link.get("recommendation_id"):
+        rec_doc = await db.recommendations.find_one({"_id": ObjectId(link["recommendation_id"])})
+        if rec_doc:
+            attached_rec = rec_to_dict(rec_doc)
+
+    return {
+        "link": {
+            "id": str(link["_id"]),
+            "token": link["token"],
+            "expires_at": link["expires_at"],
+            "submission_count": submissions,
+            "recommendation": attached_rec,   # NEW — full rec object or null
+        }
+    }
+    
 @api.get("/rec-exchange-link/{token}")
 async def get_rec_exchange_link(token: str):
     link = await db.rec_exchange_links.find_one({"token": token, "is_active": True})
@@ -1436,25 +1453,72 @@ async def get_blend_by_token(token: str, user: dict = Depends(get_optional_user)
     blend = await db.blends.find_one({"public_token": token})
     if not blend:
         raise HTTPException(404, "Blend not found")
+
     user_a = await db.users.find_one({"_id": ObjectId(blend["user_a_id"])})
     user_b = await db.users.find_one({"_id": ObjectId(blend["user_b_id"])})
-    entries_a = await db.list_entries.find({"user_id": blend["user_a_id"], "is_archived": {"$ne": True}}).sort("received_at", -1).to_list(50)
-    entries_b = await db.list_entries.find({"user_id": blend["user_b_id"], "is_archived": {"$ne": True}}).sort("received_at", -1).to_list(50)
+
+    user_a_id = blend["user_a_id"]
+    user_b_id = blend["user_b_id"]
+
+    # Find all matches directly between these two users (stranger matches)
+    direct_matches = await db.matches.find({
+        "$or": [
+            {"user_a_id": user_a_id, "user_b_id": user_b_id},
+            {"user_a_id": user_b_id, "user_b_id": user_a_id},
+        ],
+        "is_llm_fallback": {"$ne": True},
+        "status": {"$in": ["active", "completed"]},
+    }).to_list(None)
+    direct_match_ids = {str(m["_id"]) for m in direct_matches}
+
+    # Find all connection exchanges between these two users
+    direct_exchanges = await db.connection_exchanges.find({
+        "$or": [
+            {"sender_id": user_a_id, "receiver_id": user_b_id},
+            {"sender_id": user_b_id, "receiver_id": user_a_id},
+        ]
+    }).to_list(None)
+    direct_exchange_ids = {str(e["_id"]) for e in direct_exchanges}
+
+    # Collect rec IDs from those matches and exchanges
+    valid_rec_ids = set()
+    for m in direct_matches:
+        if m.get("rec_a_id"):
+            valid_rec_ids.add(m["rec_a_id"])
+        if m.get("rec_b_id"):
+            valid_rec_ids.add(m["rec_b_id"])
+    for e in direct_exchanges:
+        if e.get("recommendation_id"):
+            valid_rec_ids.add(e["recommendation_id"])
+
+    # Fetch list entries for both users, filtered to only valid recs
     combined = []
-    for e in entries_a + entries_b:
-        rec = await db.recommendations.find_one({"_id": ObjectId(e["recommendation_id"])}) if e.get("recommendation_id") else None
-        if rec:
-            combined.append({
-                "id": str(e["_id"]), "recommendation": rec_to_dict(rec),
-                "user_side": "a" if e["user_id"] == blend["user_a_id"] else "b",
-                "completion_status": e.get("completion_status"),
-            })
+    for uid, side in [(user_a_id, "a"), (user_b_id, "b")]:
+        entries = await db.list_entries.find({
+            "user_id": uid,
+            "is_archived": {"$ne": True},
+            "recommendation_id": {"$in": list(valid_rec_ids)},
+        }).sort("received_at", -1).to_list(50)
+
+        for e in entries:
+            rec = await db.recommendations.find_one({"_id": ObjectId(e["recommendation_id"])}) if e.get("recommendation_id") else None
+            if rec:
+                combined.append({
+                    "id": str(e["_id"]),
+                    "recommendation": rec_to_dict(rec),
+                    "user_side": side,
+                    "completion_status": e.get("completion_status"),
+                })
+
     combined.sort(key=lambda x: x.get("recommendation", {}).get("created_at", ""), reverse=True)
+
     return {
         "blend_type": blend.get("blend_type", "stranger"),
         "is_public": blend.get("is_public", False),
-        "score": blend.get("score"), "descriptors": blend.get("descriptors"),
-        "score_summary": blend.get("score_summary"), "score_computed_at": blend.get("score_computed_at"),
+        "score": blend.get("score"),
+        "descriptors": blend.get("descriptors"),
+        "score_summary": blend.get("score_summary"),
+        "score_computed_at": blend.get("score_computed_at"),
         "user_a_name": user_a.get("display_name", "") if user_a else "",
         "user_b_name": user_b.get("display_name", "") if user_b else "",
         "entries": combined[:50],
