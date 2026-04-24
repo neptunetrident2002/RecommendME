@@ -4,8 +4,6 @@ import { Users, UserX, Send, Loader2, Megaphone, Plus, X, Sparkles, Eye, Message
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-// Add to state declarations at the top of ConnectionsPage:
-const [selectedBlend, setSelectedBlend] = useState(null);
 
 function BlendCard({ blend: b, onSelect }) {
   const CAT_COLOR = { read: "#FF9600", listen: "#FF4B4B", watch: "#FFC800" };
@@ -99,9 +97,10 @@ export default function ConnectionsPage() {
   const [blends, setBlends] = useState([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("connections");
-  const [showSendRec, setShowSendRec] = useState(null); // connection id
+  const [showSendRec, setShowSendRec] = useState(null);
   const [showBroadcast, setShowBroadcast] = useState(false);
   const [showBroadcastResponse, setShowBroadcastResponse] = useState(null);
+  const [selectedBlend, setSelectedBlend] = useState(null); // ← FIXED: moved inside component
 
   // Send rec form
   const [sendTitle, setSendTitle] = useState("");
@@ -296,72 +295,73 @@ export default function ConnectionsPage() {
         )}
 
         {/* Blends */}
-{tab === "blends" && (
-  selectedBlend ? (
-    <BlendDetailView blend={selectedBlend} onBack={() => setSelectedBlend(null)} />
-  ) : blends.length === 0 ? (
-    <div className="bold-card p-10 text-center">
-      <Sparkles size={40} className="mx-auto text-[#b0b0b0] mb-3" />
-      <p className="text-[#6b6b6b] text-sm">Blends appear when you form connections.</p>
-    </div>
-  ) : (
-    <div className="space-y-3">
-      {blends.map((b) => (
-        <BlendCard key={b.id} blend={b} onSelect={setSelectedBlend} />
-      ))}
-    </div>
-  )
-)}
-
-      {/* Send Rec Dialog */}
-      <Dialog open={!!showSendRec} onOpenChange={(o) => { if (!o) setShowSendRec(null); }}>
-        <DialogContent className="sm:max-w-lg bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
-          <DialogHeader><DialogTitle className="font-heading text-xl font-semibold text-[#1a1a1a]">Send a recommendation</DialogTitle></DialogHeader>
-          <form onSubmit={handleSendRec} className="space-y-3">
-            <input value={sendTitle} onChange={(e) => setSendTitle(e.target.value)} required placeholder="Title" className="bold-input" />
-            <div className="grid grid-cols-2 gap-3">
-              <input value={sendAuthor} onChange={(e) => setSendAuthor(e.target.value)} placeholder="Author" className="bold-input" />
-              <input value={sendGenre} onChange={(e) => setSendGenre(e.target.value)} placeholder="Genre" className="bold-input" />
+        {tab === "blends" && (
+          selectedBlend ? (
+            <BlendDetailView blend={selectedBlend} onBack={() => setSelectedBlend(null)} />
+          ) : blends.length === 0 ? (
+            <div className="bold-card p-10 text-center">
+              <Sparkles size={40} className="mx-auto text-[#b0b0b0] mb-3" />
+              <p className="text-[#6b6b6b] text-sm">Blends appear when you form connections.</p>
             </div>
-            <textarea value={sendWhy} onChange={(e) => setSendWhy(e.target.value)} required rows={3} className="bold-input resize-none" placeholder="Why this?" />
-            <button type="submit" disabled={sending} className="w-full bold-btn bold-btn-primary py-3 text-base">{sending ? "Sending..." : "Send"}</button>
-          </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* Create Broadcast Dialog */}
-      <Dialog open={showBroadcast} onOpenChange={setShowBroadcast}>
-        <DialogContent className="sm:max-w-md bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
-          <DialogHeader><DialogTitle className="font-heading text-xl font-semibold">New broadcast</DialogTitle></DialogHeader>
-          <form onSubmit={handleCreateBroadcast} className="space-y-3">
-            <div className="flex gap-2">
-              {["read", "listen", "watch"].map((c) => (
-                <button key={c} type="button" onClick={() => setBroadcastCat(c)}
-                  className={`bold-btn px-4 py-2 text-sm capitalize ${broadcastCat === c ? "bold-btn-primary" : "bold-btn-ghost"}`}>{c}</button>
+          ) : (
+            <div className="space-y-3">
+              {blends.map((b) => (
+                <BlendCard key={b.id} blend={b} onSelect={setSelectedBlend} />
               ))}
             </div>
-            <textarea value={broadcastText} onChange={(e) => setBroadcastText(e.target.value)} required rows={3}
-              className="bold-input resize-none" placeholder="What are you looking for?" />
-            <button type="submit" disabled={creatingBroadcast} className="w-full bold-btn bold-btn-green py-3">{creatingBroadcast ? "Sending..." : "Send broadcast"}</button>
-          </form>
-        </DialogContent>
-      </Dialog>
+          )
+        )}
 
-      {/* Broadcast Response Dialog */}
-      <Dialog open={!!showBroadcastResponse} onOpenChange={(o) => { if (!o) setShowBroadcastResponse(null); }}>
-        <DialogContent className="sm:max-w-lg bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
-          <DialogHeader><DialogTitle className="font-heading text-xl font-semibold">Respond to broadcast</DialogTitle></DialogHeader>
-          <form onSubmit={handleBroadcastResponse} className="space-y-3">
-            <input value={brTitle} onChange={(e) => setBrTitle(e.target.value)} required placeholder="Title" className="bold-input" />
-            <div className="grid grid-cols-2 gap-3">
-              <input value={brAuthor} onChange={(e) => setBrAuthor(e.target.value)} placeholder="Author" className="bold-input" />
-              <input value={brGenre} onChange={(e) => setBrGenre(e.target.value)} placeholder="Genre" className="bold-input" />
-            </div>
-            <textarea value={brWhy} onChange={(e) => setBrWhy(e.target.value)} required rows={3} className="bold-input resize-none" placeholder="Why this?" />
-            <button type="submit" disabled={brSubmitting} className="w-full bold-btn bold-btn-primary py-3">{brSubmitting ? "Sending..." : "Submit"}</button>
-          </form>
-        </DialogContent>
-      </Dialog>
+        {/* Send Rec Dialog */}
+        <Dialog open={!!showSendRec} onOpenChange={(o) => { if (!o) setShowSendRec(null); }}>
+          <DialogContent className="sm:max-w-lg bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
+            <DialogHeader><DialogTitle className="font-heading text-xl font-semibold text-[#1a1a1a]">Send a recommendation</DialogTitle></DialogHeader>
+            <form onSubmit={handleSendRec} className="space-y-3">
+              <input value={sendTitle} onChange={(e) => setSendTitle(e.target.value)} required placeholder="Title" className="bold-input" />
+              <div className="grid grid-cols-2 gap-3">
+                <input value={sendAuthor} onChange={(e) => setSendAuthor(e.target.value)} placeholder="Author" className="bold-input" />
+                <input value={sendGenre} onChange={(e) => setSendGenre(e.target.value)} placeholder="Genre" className="bold-input" />
+              </div>
+              <textarea value={sendWhy} onChange={(e) => setSendWhy(e.target.value)} required rows={3} className="bold-input resize-none" placeholder="Why this?" />
+              <button type="submit" disabled={sending} className="w-full bold-btn bold-btn-primary py-3 text-base">{sending ? "Sending..." : "Send"}</button>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        {/* Create Broadcast Dialog */}
+        <Dialog open={showBroadcast} onOpenChange={setShowBroadcast}>
+          <DialogContent className="sm:max-w-md bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
+            <DialogHeader><DialogTitle className="font-heading text-xl font-semibold">New broadcast</DialogTitle></DialogHeader>
+            <form onSubmit={handleCreateBroadcast} className="space-y-3">
+              <div className="flex gap-2">
+                {["read", "listen", "watch"].map((c) => (
+                  <button key={c} type="button" onClick={() => setBroadcastCat(c)}
+                    className={`bold-btn px-4 py-2 text-sm capitalize ${broadcastCat === c ? "bold-btn-primary" : "bold-btn-ghost"}`}>{c}</button>
+                ))}
+              </div>
+              <textarea value={broadcastText} onChange={(e) => setBroadcastText(e.target.value)} required rows={3}
+                className="bold-input resize-none" placeholder="What are you looking for?" />
+              <button type="submit" disabled={creatingBroadcast} className="w-full bold-btn bold-btn-green py-3">{creatingBroadcast ? "Sending..." : "Send broadcast"}</button>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        {/* Broadcast Response Dialog */}
+        <Dialog open={!!showBroadcastResponse} onOpenChange={(o) => { if (!o) setShowBroadcastResponse(null); }}>
+          <DialogContent className="sm:max-w-lg bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
+            <DialogHeader><DialogTitle className="font-heading text-xl font-semibold">Respond to broadcast</DialogTitle></DialogHeader>
+            <form onSubmit={handleBroadcastResponse} className="space-y-3">
+              <input value={brTitle} onChange={(e) => setBrTitle(e.target.value)} required placeholder="Title" className="bold-input" />
+              <div className="grid grid-cols-2 gap-3">
+                <input value={brAuthor} onChange={(e) => setBrAuthor(e.target.value)} placeholder="Author" className="bold-input" />
+                <input value={brGenre} onChange={(e) => setBrGenre(e.target.value)} placeholder="Genre" className="bold-input" />
+              </div>
+              <textarea value={brWhy} onChange={(e) => setBrWhy(e.target.value)} required rows={3} className="bold-input resize-none" placeholder="Why this?" />
+              <button type="submit" disabled={brSubmitting} className="w-full bold-btn bold-btn-primary py-3">{brSubmitting ? "Sending..." : "Submit"}</button>
+            </form>
+          </DialogContent>
+        </Dialog>
+      </div> {/* ← closes max-w-2xl — FIXED: was missing */}
     </div>
   );
 }
