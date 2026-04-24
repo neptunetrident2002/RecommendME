@@ -16,7 +16,8 @@ export default function MyList() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("");
-  const [tab, setTab] = useState("matched_list");
+  const [tab, setTab] = useState("my_list");
+  
   const [editEntry, setEditEntry] = useState(null);
   const [editComment, setEditComment] = useState("");
   const [editStatus, setEditStatus] = useState("");
@@ -190,15 +191,20 @@ export default function MyList() {
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
                       <StatusBadge status={entry.completion_status} />
                       <div className="flex gap-1">
-                        <button onClick={() => { setEditEntry(entry); setEditComment(entry.user_comment || ""); setEditStatus(entry.completion_status || "not_started"); }}
-                          className="text-[10px] font-bold text-[#6b6b6b] hover:text-[#1a1a1a]" data-testid={`edit-entry-${entry.id}`}>Edit</button>
-                        <button onClick={() => setShareEntry(rec)} className="text-[10px] font-bold text-[#1CB0F6] hover:text-[#1a1a1a]">Share</button>
-                        {entry.is_archived ? (
-  <button onClick={async () => { try { await API.put(`/list/${entry.id}`, { is_archived: false }); toast.success("Unarchived"); loadList(); } catch {} }} className="text-[10px] text-[#58CC02] hover:text-[#1a1a1a]">Restore</button>
-) : (
-  <button onClick={() => handleArchive(entry.id)} className="text-[10px] text-[#b0b0b0] hover:text-[#1a1a1a]"><Archive size={12} /></button>
-)}
-                      </div>
+  <button onClick={() => { setEditEntry(entry); setEditComment(entry.user_comment || ""); setEditStatus(entry.completion_status || "not_started"); }}
+    className="text-[10px] font-bold text-[#6b6b6b] hover:text-[#1a1a1a]" data-testid={`edit-entry-${entry.id}`}>Edit</button>
+  <button onClick={() => setShareEntry(rec)} className="text-[10px] font-bold text-[#1CB0F6] hover:text-[#1a1a1a]">Share</button>
+  {entry.is_archived ? (
+    <button onClick={async () => { try { await API.put(`/list/${entry.id}`, { is_archived: false }); toast.success("Unarchived"); loadList(); } catch {} }} className="text-[10px] text-[#58CC02] hover:text-[#1a1a1a]">Restore</button>
+  ) : (
+    <button onClick={() => handleArchive(entry.id)} className="text-[10px] text-[#b0b0b0] hover:text-[#1a1a1a]"><Archive size={12} /></button>
+  )}
+  <button
+    onClick={() => { if (window.confirm("Remove this from your list?")) handleDelete(entry.id); }}
+    className="text-[10px] text-[#FF4B4B] hover:text-[#1a1a1a]"
+    data-testid={`delete-entry-${entry.id}`}
+  ><Trash2 size={12} /></button>
+</div>
                     </div>
                   </div>
                 </div>
