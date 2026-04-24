@@ -147,25 +147,44 @@ export default function ProfilePage() {
               </div>
             )}
             {/* Rec exchange link (Type 2) */}
-            <div className="flex items-center justify-between bg-[#FFFDF7] border-2 border-[#1a1a1a] rounded-xl p-3">
-              <div>
-                <p className="text-xs font-bold text-[#6b6b6b]">Rec exchange link (Type 2)</p>
-                {recExLink ? (
-                  <p className="text-xs text-[#b0b0b0] font-mono">/x/{recExLink.token} · expires {new Date(recExLink.expires_at).toLocaleDateString()}</p>
-                ) : (
-                  <p className="text-xs text-[#b0b0b0]">Not created</p>
-                )}
-              </div>
-              {recExLink ? (
-                <button onClick={() => copyLink(`/x/${recExLink.token}`)} className="bold-btn bold-btn-ghost px-3 py-1.5 text-xs" data-testid="copy-rec-exchange-link">
-                  <Copy size={14} />
-                </button>
-              ) : (
-                <button onClick={handleCreateRecExLink} className="bold-btn bold-btn-primary px-3 py-1.5 text-xs" data-testid="create-rec-exchange-link">
-                  <Plus size={14} />
-                </button>
-              )}
-            </div>
+<div className="bg-[#FFFDF7] border-2 border-[#1a1a1a] rounded-xl p-3">
+  <div className="flex items-center justify-between">
+    <div>
+      <p className="text-xs font-bold text-[#6b6b6b]">Rec exchange link (Type 2)</p>
+      {recExLink ? (
+        <p className="text-xs text-[#b0b0b0] font-mono">/x/{recExLink.token} · expires {new Date(recExLink.expires_at).toLocaleDateString()}</p>
+      ) : (
+        <p className="text-xs text-[#b0b0b0]">Not created</p>
+      )}
+    </div>
+    {recExLink ? (
+      <button onClick={() => copyLink(`/x/${recExLink.token}`)} className="bold-btn bold-btn-ghost px-3 py-1.5 text-xs" data-testid="copy-rec-exchange-link">
+        <Copy size={14} />
+      </button>
+    ) : (
+      <button onClick={handleCreateRecExLink} className="bold-btn bold-btn-primary px-3 py-1.5 text-xs" data-testid="create-rec-exchange-link">
+        <Plus size={14} />
+      </button>
+    )}
+  </div>
+  {recExLink?.recommendation && (
+    <div className="mt-2 pt-2 border-t border-[#e8e8e8]">
+      <span
+        className="bold-badge text-[10px] mr-2"
+        style={{
+          background: recExLink.recommendation.category === "read" ? "#FF9600" : recExLink.recommendation.category === "listen" ? "#FF4B4B" : "#FFC800",
+          color: recExLink.recommendation.category === "watch" ? "#1a1a1a" : "#fff",
+        }}
+      >
+        {recExLink.recommendation.category}
+      </span>
+      <span className="text-xs font-semibold text-[#1a1a1a]">{recExLink.recommendation.title}</span>
+      {recExLink.recommendation.author && (
+        <span className="text-xs text-[#6b6b6b] ml-1">by {recExLink.recommendation.author}</span>
+      )}
+    </div>
+  )}
+</div>
             {/* Public page */}
             {handle && isPublic && (
               <div className="flex items-center justify-between bg-[#FFFDF7] border-2 border-[#1a1a1a] rounded-xl p-3">
