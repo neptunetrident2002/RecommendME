@@ -16,7 +16,7 @@ function RecCard({ rec, side, otherName, myName }) {
   if (!rec) return null;
   const bg  = CAT_COLOR[rec.category] || "#1CB0F6";
   const txt = CAT_TEXT[rec.category]  || "#fff";
-  const label = side === "a" ? (otherName || "Them") : (myName || "You");
+  const label = side === "mine" ? (myName || "You") : (otherName || "Them");
   return (
     <div className="bold-card p-4 bg-white">
       <div className="flex items-center gap-2 mb-2">
@@ -40,19 +40,24 @@ function BlendDetailView({ connection, onBack }) {
   const [blend, setBlend]     = useState(null);
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
-
+  const [currentUserId, setCurrentUserId] = useState(null);
+  
   const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const blendRes = await API.get("/blends");
-      const myBlend  = blendRes.data.find(b => b.other_user?.id === connection.other_user?.id);
-      setBlend(myBlend || null);
-      if (myBlend?.public_token) {
-        const detail = await API.get(`/blends/${myBlend.public_token}`);
-        setEntries(detail.data.entries || []);
-      }
-    } catch { toast.error("Couldn't load blend"); }
-    finally  { setLoading(false); }
+      setLoading(true);
+      try {
+        const [blendRes, meRes] = await Promise.all([
+          API.get("/blends"),
+          API.get("/auth/me"),
+        ]);
+        const myBlend = blendRes.data.find(b => b.other_user?.id === connection.other_user?.id);
+        setBlend(myBlend || null);
+        setCurrentUserId(meRes.data.id);
+        if (myBlend?.public_token) {
+          const detail = await API.get(`/blends/${myBlend.public_token}`);
+          setEntries(detail.data.entries || []);
+        }
+      } catch { toast.error("Couldn't load blend"); }
+      finally  { setLoading(false); }
   }, [connection.other_user?.id]);
 
   useEffect(() => { load(); }, [load]);
@@ -121,7 +126,7 @@ function BlendDetailView({ connection, onBack }) {
             <RecCard
               key={e.id}
               rec={e.recommendation}
-              side={e.user_side}
+              side={e.entry_user_id === currentUserId ? "mine" : "theirs"}
               otherName={otherName}
               myName={myName}
             />
