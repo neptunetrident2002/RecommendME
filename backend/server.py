@@ -282,6 +282,7 @@ class BroadcastResponseBody(BaseModel):
 
 class ConnectionExchangeBody(BaseModel):
     connection_id: str
+    category: str
     title: str
     author: Optional[str] = None
     genre: Optional[str] = None
@@ -908,7 +909,7 @@ async def send_connection_exchange(body: ConnectionExchangeBody, background_task
     genre = normalise_genre(body.genre) if body.genre else ""
     rec_doc = {
         "user_id": user["_id"], "title": body.title, "author": body.author or "",
-        "category": "read", "genre": genre, "url": body.url or "",
+        "category": body.category, "genre": genre, "url": body.url or "",
         "og_cache": None, "why_note": body.why_note,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1030,6 +1031,36 @@ async def close_broadcast(broadcast_id: str, user: dict = Depends(get_current_us
         raise HTTPException(404, "Broadcast not found")
     await db.broadcasts.update_one({"_id": ObjectId(broadcast_id)}, {"$set": {"is_active": False}})
     return {"ok": True}
+
+@api.get("/broadcasts/{broadcast_id}/responses")
+async def get_broadcast_responses(broadcast_id: str, user: dict = Depends(get_current_user)):
+    broadcast = await db.broadcasts.find_one({"_id": ObjectId(broadcast_id)})
+    if not broadcast:
+        raise HTTPException(404, "Broadcast not found")
+    # Only owner or connections can see responses
+    if broadcast["user_id"] != user["_id"]:
+        conn = await db.connections.find_one({
+            "$or": [
+                {"user_a_id": user["_id"], "user_b_id": broadcast["user_id"], "ended_at": None},
+                {"user_a_id": broadcast["user_id"], "user_b_id": user["_id"], "ended_at": None},
+            ]
+        })
+        if not conn:
+            raise HTTPException(403, "Not authorized")
+    responses = await db.broadcast_responses.find(
+        {"broadcast_id": broadcast_id}
+    ).sort("created_at", -1).to_list(50)
+    result = []
+    for r in responses:
+        rec = await db.recommendations.find_one({"_id": ObjectId(r["recommendation_id"])}) if r.get("recommendation_id") else None
+        responder = await db.users.find_one({"_id": ObjectId(r["responder_id"])}) if r.get("responder_id") else None
+        result.append({
+            "id": str(r["_id"]),
+            "responder_name": responder.get("display_name", "Someone") if responder else "Someone",
+            "recommendation": rec_to_dict(rec) if rec else None,
+            "created_at": r["created_at"],
+        })
+    return result
 
 # ── THE LIST ──
 
@@ -1490,6 +1521,25 @@ async def get_blend_by_token(token: str, user: dict = Depends(get_optional_user)
     for e in direct_exchanges:
         if e.get("recommendation_id"):
             valid_rec_ids.add(e["recommendation_id"])
+
+    # Find broadcast responses between these two users
+    # (responses that one sent to the other's broadcast)
+    user_broadcasts = await db.broadcasts.find({
+        "user_id": {"$in": [user_a_id, user_b_id]}
+    }).to_list(None)
+    broadcast_ids = [str(b["_id"]) for b in user_broadcasts]
+    
+    if broadcast_ids:
+        broadcast_responses = await db.broadcast_responses.find({
+            "broadcast_id": {"$in": broadcast_ids},
+            "responder_id": {"$in": [user_a_id, user_b_id]},
+        }).to_list(None)
+        for br in broadcast_responses:
+            # Only include if responder is the OTHER user (not the broadcast owner)
+            owning_broadcast = next((b for b in user_broadcasts if str(b["_id"]) == br["broadcast_id"]), None)
+            if owning_broadcast and owning_broadcast["user_id"] != br["responder_id"]:
+                if br.get("recommendation_id"):
+                    valid_rec_ids.add(br["recommendation_id"])
 
     # Fetch list entries for both users, filtered to only valid recs
     combined = []
