@@ -1543,7 +1543,7 @@ async def get_blend_by_token(token: str, user: dict = Depends(get_optional_user)
 
     # Fetch list entries for both users, filtered to only valid recs
     combined = []
-    for uid, side in [(user_a_id, "a"), (user_b_id, "b")]:
+    for uid in [user_a_id, user_b_id]:
         entries = await db.list_entries.find({
             "user_id": uid,
             "is_archived": {"$ne": True},
@@ -1556,7 +1556,7 @@ async def get_blend_by_token(token: str, user: dict = Depends(get_optional_user)
                 combined.append({
                     "id": str(e["_id"]),
                     "recommendation": rec_to_dict(rec),
-                    "user_side": side,
+                    "entry_user_id": uid,        # ← actual user ID, not a/b
                     "completion_status": e.get("completion_status"),
                 })
 
@@ -1569,6 +1569,8 @@ async def get_blend_by_token(token: str, user: dict = Depends(get_optional_user)
         "descriptors": blend.get("descriptors"),
         "score_summary": blend.get("score_summary"),
         "score_computed_at": blend.get("score_computed_at"),
+        "user_a_id": user_a_id,
+        "user_b_id": user_b_id,
         "user_a_name": user_a.get("display_name", "") if user_a else "",
         "user_b_name": user_b.get("display_name", "") if user_b else "",
         "entries": combined[:50],
