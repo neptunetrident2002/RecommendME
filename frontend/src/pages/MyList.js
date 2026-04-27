@@ -165,57 +165,46 @@ export default function MyList() {
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-3">
             {entries.map((entry) => {
               const rec = entry.recommendation;
               if (!rec) return null;
               const color = CAT_COLOR[rec.category] || "#1CB0F6";
-              const txtColor = rec.category === "watch" ? "#1a1a1a" : "#fff";
               return (
-                <div key={entry.id} className="bold-card p-5 flex flex-col" data-testid={`list-entry-${entry.id}`}>
-                  {/* Top: badge row */}
-                  <div className="flex items-center gap-2 mb-3">
-                    <span className="bold-badge text-[10px] font-bold px-2.5 py-0.5 rounded-full"
-                      style={{ background: color, color: txtColor }}>{rec.category}</span>
-                    {rec.genre && <span className="bold-badge bg-[#FFFDF7] text-[10px]">{rec.genre}</span>}
-                    <StatusBadge status={entry.completion_status} />
-                  </div>
-
-                  {/* Title + Author */}
-                  <h3 className="font-heading font-semibold text-[#1a1a1a] text-base leading-snug mb-1">{rec.title}</h3>
-                  {rec.author && <p className="text-sm text-[#6b6b6b]">{rec.author}</p>}
-
-                  {/* Why-note quote box */}
-                  {rec.why_note && (
-                    <div className="mt-3 bg-[#FFFDF7] border-2 border-[#e8e8e8] rounded-xl p-3">
-                      <p className="text-xs text-[#333] italic leading-relaxed line-clamp-3">"{rec.why_note}"</p>
-                    </div>
-                  )}
-
-                  {/* User comment */}
-                  {entry.user_comment && (
-                    <p className="mt-2 text-[10px] text-[#6b6b6b] flex items-start gap-1">
-                      <MessageSquare size={10} className="shrink-0 mt-0.5" />{entry.user_comment}
-                    </p>
-                  )}
-
-                  {/* Source + Actions footer */}
-                  <div className="mt-auto pt-3 border-t border-[#f0f0f0] flex items-center justify-between">
-                    <span className="text-[10px] text-[#b0b0b0]">{SOURCE_LABEL[entry.source_type] || ""}</span>
-                    <div className="flex gap-2">
-                      <button onClick={() => { setEditEntry(entry); setEditComment(entry.user_comment || ""); setEditStatus(entry.completion_status || "not_started"); }}
-                        className="text-[10px] font-bold text-[#6b6b6b] hover:text-[#1a1a1a]" data-testid={`edit-entry-${entry.id}`}>Edit</button>
-                      <button onClick={() => setShareEntry(rec)}
-                        className="text-[10px] font-bold text-[#1CB0F6] hover:text-[#1a1a1a]">Share</button>
-                      {entry.is_archived ? (
-                        <button onClick={async () => { try { await API.put(`/list/${entry.id}`, { is_archived: false }); toast.success("Unarchived"); loadList(); } catch {} }}
-                          className="text-[10px] text-[#58CC02] hover:text-[#1a1a1a]">Restore</button>
-                      ) : (
-                        <button onClick={() => handleArchive(entry.id)}
-                          className="text-[10px] text-[#b0b0b0] hover:text-[#1a1a1a]"><Archive size={12} /></button>
+                <div key={entry.id} className="bold-card p-4" data-testid={`list-entry-${entry.id}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="bold-badge text-[10px]" style={{ background: color, color: color === "#FFC800" ? "#1a1a1a" : "#fff" }}>{rec.category}</span>
+                        {rec.genre && <span className="bold-badge bg-[#FFFDF7] text-[10px]">{rec.genre}</span>}
+                        <span className="text-[10px] text-[#b0b0b0]">{SOURCE_LABEL[entry.source_type] || ""}</span>
+                      </div>
+                      <h3 className="font-heading font-semibold text-[#1a1a1a] text-sm">{rec.title}</h3>
+                      {rec.author && <p className="text-xs text-[#6b6b6b]">{rec.author}</p>}
+                      <p className="text-xs text-[#6b6b6b] mt-1 italic line-clamp-2">"{rec.why_note}"</p>
+                      {entry.user_comment && (
+                        <p className="mt-1.5 text-[10px] text-[#6b6b6b] bold-card !p-2 !shadow-none">
+                          <MessageSquare size={10} className="inline mr-1" />{entry.user_comment}
+                        </p>
                       )}
-                      <button onClick={() => { if (window.confirm("Remove this from your list?")) handleDelete(entry.id); }}
-                        className="text-[10px] text-[#FF4B4B] hover:text-[#1a1a1a]" data-testid={`delete-entry-${entry.id}`}><Trash2 size={12} /></button>
+                    </div>
+                    <div className="flex flex-col items-end gap-1.5 shrink-0">
+                      <StatusBadge status={entry.completion_status} />
+                      <div className="flex gap-1">
+  <button onClick={() => { setEditEntry(entry); setEditComment(entry.user_comment || ""); setEditStatus(entry.completion_status || "not_started"); }}
+    className="text-[10px] font-bold text-[#6b6b6b] hover:text-[#1a1a1a]" data-testid={`edit-entry-${entry.id}`}>Edit</button>
+  <button onClick={() => setShareEntry(rec)} className="text-[10px] font-bold text-[#1CB0F6] hover:text-[#1a1a1a]">Share</button>
+  {entry.is_archived ? (
+    <button onClick={async () => { try { await API.put(`/list/${entry.id}`, { is_archived: false }); toast.success("Unarchived"); loadList(); } catch {} }} className="text-[10px] text-[#58CC02] hover:text-[#1a1a1a]">Restore</button>
+  ) : (
+    <button onClick={() => handleArchive(entry.id)} className="text-[10px] text-[#b0b0b0] hover:text-[#1a1a1a]"><Archive size={12} /></button>
+  )}
+  <button
+    onClick={() => { if (window.confirm("Remove this from your list?")) handleDelete(entry.id); }}
+    className="text-[10px] text-[#FF4B4B] hover:text-[#1a1a1a]"
+    data-testid={`delete-entry-${entry.id}`}
+  ><Trash2 size={12} /></button>
+</div>
                     </div>
                   </div>
                 </div>
