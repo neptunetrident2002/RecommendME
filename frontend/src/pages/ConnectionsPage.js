@@ -139,11 +139,12 @@ function BlendDetailView({ connection, onBack }) {
 
 // ─── Exchange Modal ─────────────────────────────────────────────────────────
 function ExchangeModal({ connectionId, onClose, onSent }) {
-  const [step, setStep]         = useState("pick_category"); // pick_category → fill_rec
-  const [category, setCategory] = useState(null);
-  const [myRecs, setMyRecs]     = useState([]);
+  const [mode, setMode]           = useState(null); // null → "exchange" | "send"
+  const [category, setCategory]   = useState("read");
+  const [myRecs, setMyRecs]       = useState([]);
   const [listEntries, setListEntries] = useState([]);
   const [loadingRecs, setLoadingRecs] = useState(false);
+  const [showImport, setShowImport] = useState(false);
 
   // form fields
   const [title,  setTitle]  = useState("");
@@ -152,24 +153,21 @@ function ExchangeModal({ connectionId, onClose, onSent }) {
   const [why,    setWhy]    = useState("");
   const [url,    setUrl]    = useState("");
   const [sending, setSending] = useState(false);
+  const [resultStatus, setResultStatus] = useState(null); // "waiting" | "sent" | "revealed"
 
-  const loadRecs = async (cat) => {
+  useEffect(() => { loadRecs(); }, []);
+
+  const loadRecs = async () => {
     setLoadingRecs(true);
     try {
       const [recRes, listRes] = await Promise.all([
         API.get("/recommendations/mine"),
-        API.get(`/list?tab=my_list`),
+        API.get("/list?tab=my_list"),
       ]);
-      setMyRecs(recRes.data.filter(r => r.category === cat));
-      setListEntries(listRes.data.filter(e => e.recommendation?.category === cat));
+      setMyRecs(recRes.data);
+      setListEntries(listRes.data);
     } catch { }
     finally { setLoadingRecs(false); }
-  };
-
-  const handleCategorySelect = (cat) => {
-    setCategory(cat);
-    setStep("fill_rec");
-    loadRecs(cat);
   };
 
   const fillFromRec = (rec) => {
@@ -178,6 +176,8 @@ function ExchangeModal({ connectionId, onClose, onSent }) {
     setGenre(rec.genre || "");
     setWhy(rec.why_note || "");
     setUrl(rec.url || "");
+    if (rec.category) setCategory(rec.category);
+    setShowImport(false);
   };
 
   const handleSubmit = async (e) => {
@@ -185,102 +185,176 @@ function ExchangeModal({ connectionId, onClose, onSent }) {
     if (why.length < 20) { toast.error("Why-note must be at least 20 characters"); return; }
     setSending(true);
     try {
-      await API.post("/connection-exchange", {
+      const { data } = await API.post("/connection-exchange", {
         connection_id: connectionId,
         category,
         title, author, genre, url, why_note: why,
+        mode: mode,
       });
-      toast.success("Recommendation sent!");
-      onSent();
-      onClose();
+      if (data.status === "waiting") {
+        setResultStatus("waiting");
+      } else if (data.status === "revealed") {
+        toast.success("Exchange complete! Both recommendations revealed.");
+        onSent();
+        onClose();
+      } else {
+        toast.success("Recommendation sent!");
+        onSent();
+        onClose();
+      }
     } catch (err) { toast.error(err.response?.data?.detail || "Failed to send"); }
     finally { setSending(false); }
   };
 
-  const bgColor = category ? CAT_COLOR[category] : "#1a1a1a";
+  const bgColor = CAT_COLOR[category] || "#1a1a1a";
   const txtColor = category === "watch" ? "#1a1a1a" : "#fff";
+
+  const filteredRecs = myRecs.filter(r => r.category === category);
+  const filteredEntries = listEntries.filter(e => e.recommendation?.category === category && !filteredRecs.find(r => r.id === e.recommendation?.id));
 
   return (
     <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogContent className="sm:max-w-lg bg-white border-2 border-[#1a1a1a] rounded-2xl shadow-[4px_4px_0_#1a1a1a]">
         <DialogHeader>
           <DialogTitle className="font-heading text-xl font-semibold text-[#1a1a1a]">
-            {step === "pick_category" ? "What are you recommending?" : (
-              <span className="flex items-center gap-2">
-                <span className="bold-badge px-2 py-0.5 rounded-full text-sm"
-                  style={{ background: bgColor, color: txtColor }}>
-                  {category}
-                </span>
-                Exchange
-              </span>
-            )}
+            {resultStatus === "waiting" ? "Exchange pending" : mode ? (mode === "exchange" ? "Exchange recommendation" : "Send recommendation") : "Choose an action"}
           </DialogTitle>
         </DialogHeader>
 
-        {step === "pick_category" && (
-          <div className="space-y-3 pt-2">
-            <p className="text-sm text-[#6b6b6b]">Pick a category to recommend in.</p>
-            <div className="grid grid-cols-3 gap-3">
-              {["read", "listen", "watch"].map(cat => (
-                <button key={cat} onClick={() => handleCategorySelect(cat)}
-                  className="bold-card p-5 text-center hover:scale-[1.02] transition-transform cursor-pointer"
-                  style={{ borderColor: CAT_COLOR[cat] }}>
-                  <span className="font-heading font-bold text-base capitalize"
-                    style={{ color: CAT_COLOR[cat] }}>{cat}</span>
-                </button>
-              ))}
+        {/* Waiting state */}
+        {resultStatus === "waiting" && (
+          <div className="text-center py-6 space-y-4">
+            <div className="w-16 h-16 mx-auto rounded-full bg-[#E3F2FD] border-2 border-[#1a1a1a] flex items-center justify-center">
+              <RefreshCw size={28} className="text-[#1CB0F6] animate-spin" style={{ animationDuration: "3s" }} />
             </div>
+            <div>
+              <p className="font-heading font-semibold text-[#1a1a1a] text-lg">Waiting for their recommendation</p>
+              <p className="text-sm text-[#6b6b6b] mt-1">Once they submit theirs, both will be revealed!</p>
+            </div>
+            <button onClick={onClose} className="bold-btn bold-btn-ghost px-6 py-2.5 text-sm">Done</button>
           </div>
         )}
 
-        {step === "fill_rec" && (
-          <form onSubmit={handleSubmit} className="space-y-3 pt-1">
-            {/* Import from existing */}
-            {loadingRecs ? (
-              <p className="text-xs text-[#b0b0b0]">Loading your recommendations...</p>
-            ) : (myRecs.length > 0 || listEntries.length > 0) && (
-              <div>
-                <p className="text-xs font-bold text-[#6b6b6b] mb-1.5 uppercase tracking-wide">Import from your list</p>
-                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                  {myRecs.map(r => (
-                    <button key={r.id} type="button" onClick={() => fillFromRec(r)}
-                      className="w-full text-left bold-card px-3 py-2 hover:shadow-none hover:translate-x-1 hover:translate-y-1 transition-all">
-                      <span className="text-xs font-semibold text-[#1a1a1a]">{r.title}</span>
-                      {r.author && <span className="text-[10px] text-[#6b6b6b] ml-1">— {r.author}</span>}
-                    </button>
-                  ))}
-                  {listEntries.filter(e => !myRecs.find(r => r.id === e.recommendation?.id)).map(e => (
-                    <button key={e.id} type="button" onClick={() => fillFromRec(e.recommendation)}
-                      className="w-full text-left bold-card px-3 py-2 hover:shadow-none hover:translate-x-1 hover:translate-y-1 transition-all">
-                      <span className="text-xs font-semibold text-[#1a1a1a]">{e.recommendation?.title}</span>
-                      {e.recommendation?.author && <span className="text-[10px] text-[#6b6b6b] ml-1">— {e.recommendation.author}</span>}
-                    </button>
-                  ))}
+        {/* Mode selection */}
+        {!mode && !resultStatus && (
+          <div className="space-y-3 pt-2">
+            <p className="text-sm text-[#6b6b6b]">How do you want to share?</p>
+            <button onClick={() => setMode("exchange")}
+              className="w-full bold-card p-5 text-left hover:scale-[1.01] transition-transform cursor-pointer">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-[#E8F5E9] border-2 border-[#1a1a1a] flex items-center justify-center">
+                  <RefreshCw size={20} className="text-[#58CC02]" />
                 </div>
-                <div className="border-t-2 border-dashed border-[#e0e0e0] my-3" />
+                <div>
+                  <p className="font-heading font-bold text-base text-[#1a1a1a]">Exchange</p>
+                  <p className="text-xs text-[#6b6b6b]">Both of you send a rec — revealed together</p>
+                </div>
+              </div>
+            </button>
+            <button onClick={() => setMode("send")}
+              className="w-full bold-card p-5 text-left hover:scale-[1.01] transition-transform cursor-pointer">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-[#E3F2FD] border-2 border-[#1a1a1a] flex items-center justify-center">
+                  <Send size={20} className="text-[#1CB0F6]" />
+                </div>
+                <div>
+                  <p className="font-heading font-bold text-base text-[#1a1a1a]">Send</p>
+                  <p className="text-xs text-[#6b6b6b]">Directly send a recommendation to them</p>
+                </div>
+              </div>
+            </button>
+          </div>
+        )}
+
+        {/* Rec form (single modal with category toggles) */}
+        {mode && !resultStatus && (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Category toggles */}
+            <div>
+              <label className="block text-xs font-bold text-[#6b6b6b] mb-1">Category</label>
+              <div className="flex gap-2">
+                {["read", "listen", "watch"].map((c) => (
+                  <button key={c} type="button" onClick={() => setCategory(c)}
+                    className={`bold-btn px-4 py-2 text-sm capitalize ${category === c ? "" : "bold-btn-ghost"}`}
+                    style={category === c ? { background: CAT_COLOR[c], color: c === "watch" ? "#1a1a1a" : "#fff", border: "2px solid #1a1a1a" } : {}}>
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Title */}
+            <div>
+              <label className="block text-xs font-bold text-[#6b6b6b] mb-1">Title</label>
+              <input value={title} onChange={e => setTitle(e.target.value)} required
+                placeholder="What are you recommending?" className="bold-input" />
+            </div>
+
+            {/* Author + Genre */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold text-[#6b6b6b] mb-1">Author</label>
+                <input value={author} onChange={e => setAuthor(e.target.value)} className="bold-input" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-[#6b6b6b] mb-1">Genre</label>
+                <input value={genre} onChange={e => setGenre(e.target.value)}
+                  placeholder="e.g. literary fiction" className="bold-input" />
+              </div>
+            </div>
+
+            {/* URL */}
+            <div>
+              <label className="block text-xs font-bold text-[#6b6b6b] mb-1">URL <span className="text-[#b0b0b0]">(optional)</span></label>
+              <input value={url} onChange={e => setUrl(e.target.value)}
+                placeholder="https://..." className="bold-input" />
+            </div>
+
+            {/* Why note */}
+            <div>
+              <label className="block text-xs font-bold text-[#6b6b6b] mb-1">Why-note <span className="text-[#b0b0b0]">(min 20 chars)</span></label>
+              <textarea value={why} onChange={e => setWhy(e.target.value)} required rows={3}
+                className="bold-input resize-none" placeholder="What did this change for you?" />
+              <p className="text-xs text-[#b0b0b0] mt-1">{why.length}/20</p>
+            </div>
+
+            {/* Collapsible import section */}
+            {!loadingRecs && (filteredRecs.length > 0 || filteredEntries.length > 0) && (
+              <div>
+                <button type="button" onClick={() => setShowImport(!showImport)}
+                  className="flex items-center gap-1.5 text-xs font-bold text-[#6b6b6b] hover:text-[#1a1a1a] transition-colors">
+                  <span className={`transition-transform ${showImport ? "rotate-90" : ""}`}>▶</span>
+                  Import from your list ({filteredRecs.length + filteredEntries.length})
+                </button>
+                {showImport && (
+                  <div className="mt-2 space-y-1.5 max-h-36 overflow-y-auto pr-1 animate-fade-in">
+                    {filteredRecs.map(r => (
+                      <button key={r.id} type="button" onClick={() => fillFromRec(r)}
+                        className="w-full text-left bold-card px-3 py-2 hover:shadow-none hover:translate-x-1 hover:translate-y-1 transition-all">
+                        <span className="text-xs font-semibold text-[#1a1a1a]">{r.title}</span>
+                        {r.author && <span className="text-[10px] text-[#6b6b6b] ml-1">— {r.author}</span>}
+                      </button>
+                    ))}
+                    {filteredEntries.map(e => (
+                      <button key={e.id} type="button" onClick={() => fillFromRec(e.recommendation)}
+                        className="w-full text-left bold-card px-3 py-2 hover:shadow-none hover:translate-x-1 hover:translate-y-1 transition-all">
+                        <span className="text-xs font-semibold text-[#1a1a1a]">{e.recommendation?.title}</span>
+                        {e.recommendation?.author && <span className="text-[10px] text-[#6b6b6b] ml-1">— {e.recommendation.author}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
-            <input value={title} onChange={e => setTitle(e.target.value)} required
-              placeholder="Title" className="bold-input" />
-            <div className="grid grid-cols-2 gap-3">
-              <input value={author} onChange={e => setAuthor(e.target.value)}
-                placeholder="Author / Artist / Director" className="bold-input" />
-              <input value={genre} onChange={e => setGenre(e.target.value)}
-                placeholder="Genre (optional)" className="bold-input" />
-            </div>
-            <input value={url} onChange={e => setUrl(e.target.value)}
-              placeholder="Link (optional)" className="bold-input" />
-            <textarea value={why} onChange={e => setWhy(e.target.value)} required rows={3}
-              className="bold-input resize-none"
-              placeholder="Why this? (min 20 chars)" />
+            {/* Submit */}
             <div className="flex gap-2 pt-1">
-              <button type="button" onClick={() => setStep("pick_category")}
+              <button type="button" onClick={() => setMode(null)}
                 className="bold-btn bold-btn-ghost px-4 py-2.5 text-sm">← Back</button>
               <button type="submit" disabled={sending}
-                className="flex-1 bold-btn py-2.5 text-sm font-bold text-white"
-                style={{ background: bgColor, color: txtColor }}>
-                {sending ? "Sending..." : "Send recommendation"}
+                className="flex-1 bold-btn py-2.5 text-sm font-bold"
+                style={{ background: bgColor, color: txtColor, border: "2px solid #1a1a1a", boxShadow: "4px 4px 0 #1a1a1a" }}>
+                {sending ? "Sending..." : mode === "exchange" ? "Submit exchange" : "Send recommendation"}
               </button>
             </div>
           </form>
@@ -298,7 +372,7 @@ function BroadcastDetail({ broadcast, onBack }) {
   useEffect(() => {
     API.get(`/broadcasts/${broadcast.id}/responses`)
       .then(r => setResponses(r.data))
-      .catch(() => toast.error("Couldn't load responses"))
+      .catch((err) => toast.error(err.response?.data?.detail || "Couldn't load responses"))
       .finally(() => setLoading(false));
   }, [broadcast.id]);
 
@@ -710,7 +784,6 @@ export default function ConnectionsPage() {
               {brSubmitting ? "Sending..." : "Submit response"}
             </button>
           </form>
-              
         </DialogContent>
       </Dialog>
     </div>
